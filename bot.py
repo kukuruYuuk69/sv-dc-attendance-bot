@@ -6,6 +6,7 @@ from datetime import datetime, time, timedelta
 import pytz
 import os
 import json
+import re
 from typing import Literal
 
 # Auto-load .env jika file ada
@@ -62,24 +63,28 @@ cursor.execute('''
         open_time TEXT,
         close_time TEXT,
         start_day TEXT,
-        templates TEXT
+        templates TEXT,
+        ping_role_id TEXT
     )
 ''')
 conn.commit()
 
+# Pastikan kolom ping_role_id ada jika database lama
+try:
+    cursor.execute("ALTER TABLE guild_config ADD COLUMN ping_role_id TEXT")
+    conn.commit()
+except Exception:
+    pass
+
 # Default Templates
 DEFAULT_TEMPLATES = {
-    "absen": (
-        "📋 **TEMPLATE ABSENSI:**\n"
-        "```text\n"
+    "absen_fields": (
         "Nama: \n"
         "Pangkat: \n"
         "Job: \n"
         "Divisi: \n"
         "Status: Hadir\n"
-        "Ping: <@&1500812071024197682>\n"
-        "```\n"
-        "*(Wajib menyertakan screenshot/foto in-game)*"
+        "Ping: <@&{ping_role_id}>"
     ),
     "opening": (
         "⏰ 【 SINYAL DINAS ON DUTY DIMULAI 】⏰\n\n"
@@ -131,6 +136,7 @@ def get_guild_config(guild_id: int):
     default_staff_roles = [
         int(r.strip()) for r in os.getenv("ROLE_MODERATOR_IDS", "1500812071024197682,1500811613794599022").split(",") if r.strip()
     ]
+    default_ping_role = default_staff_roles[0] if default_staff_roles else 1500812071024197682
 
     if not row:
         cfg = {
@@ -142,12 +148,13 @@ def get_guild_config(guild_id: int):
             "open_time": "07:00",
             "close_time": "22:00",
             "start_day": "monday",
-            "templates": DEFAULT_TEMPLATES.copy()
+            "templates": DEFAULT_TEMPLATES.copy(),
+            "ping_role_id": default_ping_role
         }
         cursor.execute(
             '''INSERT OR REPLACE INTO guild_config 
-               (guild_id, absen_channel_id, rekap_channel_id, wajib_absen_roles, staff_roles, open_time, close_time, start_day, templates)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+               (guild_id, absen_channel_id, rekap_channel_id, wajib_absen_roles, staff_roles, open_time, close_time, start_day, templates, ping_role_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (
                 gid_str,
                 str(cfg["absen_channel_id"]),
@@ -157,7 +164,8 @@ def get_guild_config(guild_id: int):
                 cfg["open_time"],
                 cfg["close_time"],
                 cfg["start_day"],
-                json.dumps(cfg["templates"])
+                json.dumps(cfg["templates"]),
+                str(cfg["ping_role_id"])
             )
         )
         conn.commit()
@@ -179,6 +187,14 @@ def get_guild_config(guild_id: int):
     except Exception:
         tmpl = DEFAULT_TEMPLATES.copy()
 
+    # Pastikan ping_role_id ada
+    ping_role = default_ping_role
+    if len(row) > 9 and row[9]:
+        try:
+            ping_role = int(row[9])
+        except Exception:
+            ping_role = default_ping_role
+
     return {
         "guild_id": gid_str,
         "absen_channel_id": int(row[1]) if row[1] else int(default_absen),
@@ -188,7 +204,8 @@ def get_guild_config(guild_id: int):
         "open_time": row[5] or "07:00",
         "close_time": row[6] or "22:00",
         "start_day": row[7] or "monday",
-        "templates": tmpl
+        "templates": tmpl,
+        "ping_role_id": ping_role
     }
 
 # Helper: Update Konfigurasi Dinamis Guild
@@ -205,7 +222,8 @@ def update_guild_config(guild_id: int, key: str, value):
            open_time = ?,
            close_time = ?,
            start_day = ?,
-           templates = ?
+           templates = ?,
+           ping_role_id = ?
            WHERE guild_id = ?''',
         (
             str(cfg["absen_channel_id"]),
@@ -216,10 +234,46 @@ def update_guild_config(guild_id: int, key: str, value):
             cfg["close_time"],
             cfg["start_day"],
             json.dumps(cfg["templates"]),
+            str(cfg["ping_role_id"]),
             str(guild_id)
         )
     )
     conn.commit()
+
+# Helper: Render Template Absensi dengan Header, Code Block, dan Footer
+def render_attendance_template(cfg: dict) -> str:
+    ping_role_id = cfg.get("ping_role_id") or 1500812071024197682
+    tmpl = cfg.get("templates", {})
+
+    # Ambil fields form jika ada, atau buat dari template default
+    if "absen_fields" in tmpl:
+        fields_str = tmpl["absen_fields"].format(ping_role_id=ping_role_id)
+    elif "absen" in tmpl:
+        # Jika template disimpan utuh, ekstrak atau gunakan langsung
+        raw_absen = tmpl["absen"]
+        if "```" in raw_absen:
+            # Gunakan yang sudah tersimpan
+            return raw_absen.replace("{ping_role_id}", str(ping_role_id))
+        fields_str = raw_absen
+    else:
+        fields_str = (
+            "Nama: \n"
+            "Pangkat: \n"
+            "Job: \n"
+            "Divisi: \n"
+            "Status: Hadir\n"
+            f"Ping: <@&{ping_role_id}>"
+        )
+
+    # Susun 3 bagian konsisten: Header, Code Block, Footer
+    rendered = (
+        "📋 **TEMPLATE ABSENSI:**\n"
+        "```text\n"
+        f"{fields_str.strip()}\n"
+        "```\n"
+        "*(Wajib menyertakan screenshot/foto in-game)*"
+    )
+    return rendered
 
 # Helper Validasi Staf (Admin & Moderator)
 def check_is_staff(interaction: discord.Interaction) -> bool:
@@ -288,8 +342,8 @@ async def execute_opening(channel: discord.TextChannel, cfg: dict):
                 pass
 
         open_text = cfg["templates"].get("opening", DEFAULT_TEMPLATES["opening"])
-        absen_text = cfg["templates"].get("absen", DEFAULT_TEMPLATES["absen"])
-        full_message = f"{open_text}\n\n━━━━━━━━━━━━━━━━━━\n{absen_text}"
+        absen_template = render_attendance_template(cfg)
+        full_message = f"{open_text}\n\n━━━━━━━━━━━━━━━━━━\n{absen_template}"
 
         new_msg = await channel.send(full_message)
         await new_msg.pin()
@@ -546,6 +600,7 @@ async def slash_help(interaction: discord.Interaction):
         name="⚙️ Perintah Konfigurasi Server (`/config`)",
         value=(
             "`/config show` — Tampilkan seluruh pengaturan dinamis server aktif.\n"
+            "`/config ping_role` — Atur role yang otomatis di-ping pada baris `Ping:` di template absensi.\n"
             "`/config role_absen` — Tambah atau hapus role wajib absen.\n"
             "`/config role_staff` — Tambah atau hapus role staf pengawas (Admin/Mod).\n"
             "`/config jadwal` — Atur jam buka dan tutup absensi otomatis (WIB).\n"
@@ -575,6 +630,7 @@ async def config_show(interaction: discord.Interaction):
 
     wajib_roles_str = ", ".join([f"<@&{r}>" for r in cfg["wajib_absen_roles"]]) or "Belum diatur"
     staff_roles_str = ", ".join([f"<@&{r}>" for r in cfg["staff_roles"]]) or "Belum diatur"
+    ping_role_str = f"<@&{cfg['ping_role_id']}>" if cfg.get("ping_role_id") else "Default"
 
     embed = discord.Embed(
         title=f"⚙️ Konfigurasi Server: {interaction.guild.name}",
@@ -583,13 +639,24 @@ async def config_show(interaction: discord.Interaction):
     )
     embed.add_field(name="Saluran Absensi", value=absen_ch.mention if absen_ch else f"ID: {cfg['absen_channel_id']}", inline=True)
     embed.add_field(name="Saluran Rekap", value=rekap_ch.mention if rekap_ch else f"ID: {cfg['rekap_channel_id']}", inline=True)
+    embed.add_field(name="Role Target Ping", value=ping_role_str, inline=True)
     embed.add_field(name="Hari Awal Siklus", value=cfg["start_day"].capitalize(), inline=True)
-    embed.add_field(name="Jadwal Otomatis (WIB)", value=f"Buka: `{cfg['open_time']}` | Tutup: `{cfg['close_time']}`", inline=False)
+    embed.add_field(name="Jadwal Otomatis (WIB)", value=f"Buka: `{cfg['open_time']}` | Tutup: `{cfg['close_time']}`", inline=True)
     embed.add_field(name="Role Wajib Absen", value=wajib_roles_str, inline=False)
     embed.add_field(name="Role Staf Pengawas", value=staff_roles_str, inline=False)
     embed.set_footer(text="Gunakan sub-command /config untuk mengubah pengaturan")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@config_group.command(name="ping_role", description="Atur role yang otomatis di-mention pada baris Ping di template absensi.")
+@app_commands.describe(role="Role target yang akan di-mention pada template absen")
+async def config_ping_role(interaction: discord.Interaction, role: discord.Role):
+    if not check_is_staff(interaction):
+        await interaction.response.send_message("❌ Anda tidak memiliki izin.", ephemeral=True)
+        return
+
+    update_guild_config(interaction.guild.id, "ping_role_id", role.id)
+    await interaction.response.send_message(f"✅ Target baris `Ping:` pada template absensi berhasil diatur ke: {role.mention}.", ephemeral=True)
 
 @config_group.command(name="role_absen", description="Tambah atau hapus role wajib absen.")
 @app_commands.describe(role="Role yang ingin dikonfigurasi", aksi="Pilih tambah atau hapus")
@@ -681,7 +748,7 @@ async def config_channel(interaction: discord.Interaction, tipe: Literal["absens
 
 @config_group.command(name="template", description="Kustomisasi template teks pesan bot.")
 @app_commands.describe(jenis="Pilih template yang ingin diubah", teks="Teks template baru")
-async def config_template(interaction: discord.Interaction, jenis: Literal["opening", "closing", "absen", "teguran", "peringatan"], teks: str):
+async def config_template(interaction: discord.Interaction, jenis: Literal["opening", "closing", "teguran", "peringatan"], teks: str):
     if not check_is_staff(interaction):
         await interaction.response.send_message("❌ Anda tidak memiliki izin.", ephemeral=True)
         return
@@ -728,17 +795,6 @@ async def check_dynamic_schedules():
                     last_executed_close_minute[guild.id] = current_time_str
                     print(f"[{guild.name}] Trigger otomatis jadwal tutup dinas: {current_time_str} WIB")
                     await execute_closing(absen_channel, cfg)
-
-                    # Cek apakah hari ini adalah hari terakhir siklus rekap mingguan
-                    # Hari terakhir siklus adalah 6 hari setelah start_day
-                    start_idx = DAY_MAP.get(cfg["start_day"].lower(), 0)
-                    end_idx = (start_idx + 6) % 7
-                    if now_wib.weekday() == end_idx:
-                        print(f"[{guild.name}] Menjalankan rekapitulasi otomatis akhir siklus mingguan...")
-                        rekap_channel = guild.get_channel(cfg["rekap_channel_id"])
-                        if rekap_channel:
-                            # Kirim rekap mingguan otomatis
-                            pass
         except Exception as e:
             print(f"Error pada loop jadwal guild {guild.id}: {e}")
 
@@ -770,6 +826,8 @@ async def on_message(message: discord.Message):
 
         if is_wajib:
             content = message.content
+            # Normalisasi konten untuk pengecekan kata kunci (hilangkan backticks jika member mengetik di dalam/luar codeblock)
+            normalized_content = content.replace("`", "")
 
             # Validasi 1: Wajib Melampirkan Foto / Screenshot
             if not message.attachments:
@@ -787,14 +845,16 @@ async def on_message(message: discord.Message):
                 return
 
             # Validasi 2: Template Teks Absensi Wajib
-            required_fields = ["Nama:", "Pangkat:", "Job:", "Divisi:", "Status: Hadir"]
-            missing_fields = [f for f in required_fields if f not in content]
-            if missing_fields:
+            # Memeriksa kata kunci form inti secara fleksibel terhadap format code block
+            required_keywords = ["nama:", "pangkat:", "job:", "divisi:", "status:"]
+            missing_keywords = [kw for kw in required_keywords if kw not in normalized_content.lower()]
+
+            if missing_keywords:
                 await message.delete()
-                absen_hint = cfg["templates"].get("absen", DEFAULT_TEMPLATES["absen"])
+                template_rendered = render_attendance_template(cfg)
                 await message.channel.send(
                     f"⚠️ {message.author.mention} Format absen tidak sesuai!\n"
-                    f"Wajib menggunakan template berikut secara presisi:\n{absen_hint}",
+                    f"Wajib menggunakan template berikut secara presisi:\n{template_rendered}",
                     delete_after=20
                 )
                 await send_audit_log(
@@ -818,9 +878,9 @@ async def on_message(message: discord.Message):
                 fields={"Member": f"{message.author.name} ({message.author.id})", "Tanggal": today_str}
             )
 
-            # Kirim Template Absen Baru di Bawahnya
-            absen_hint = cfg["templates"].get("absen", DEFAULT_TEMPLATES["absen"])
-            await message.channel.send(absen_hint)
+            # Kirim Template Absen Baru yang Rapi di Bawahnya (Header, Code Block, Footer)
+            new_template_hint = render_attendance_template(cfg)
+            await message.channel.send(new_template_hint)
 
     await bot.process_commands(message)
 
