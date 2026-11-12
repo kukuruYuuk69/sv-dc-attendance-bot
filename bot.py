@@ -112,20 +112,18 @@ def get_guild_config(guild_id: int):
     cursor.execute("SELECT * FROM guild_config WHERE guild_id = ?", (gid_str,))
     row = cursor.fetchone()
 
-    # Fallback default murni agnostik (tidak ada hardcode ID role)
-    default_absen = os.getenv("ABSEN_CHANNEL_ID", "0")
-    default_rekap = os.getenv("REKAP_CHANNEL_ID", "0")
-    default_wajib_roles = [int(os.getenv("ROLE_WAJIB_ABSEN_ID"))] if os.getenv("ROLE_WAJIB_ABSEN_ID") else []
-    default_staff_roles = [
-        int(r.strip()) for r in os.getenv("ROLE_MODERATOR_IDS", "").split(",") if r.strip()
-    ]
+    # Fallback default murni 100% agnostik: semua role dan channel kosong bersih
+    default_absen = 0
+    default_rekap = 0
+    default_wajib_roles = []
+    default_staff_roles = []
     default_ping_roles = []
 
     if not row:
         cfg = {
             "guild_id": gid_str,
-            "absen_channel_id": int(default_absen),
-            "rekap_channel_id": int(default_rekap),
+            "absen_channel_id": default_absen,
+            "rekap_channel_id": default_rekap,
             "wajib_absen_roles": default_wajib_roles,
             "staff_roles": default_staff_roles,
             "open_time": "07:00",
@@ -160,12 +158,12 @@ def get_guild_config(guild_id: int):
     try:
         w_roles = [int(x) for x in json.loads(row[3])]
     except Exception:
-        w_roles = default_wajib_roles
+        w_roles = []
 
     try:
         s_roles = [int(x) for x in json.loads(row[4])]
     except Exception:
-        s_roles = default_staff_roles
+        s_roles = []
 
     try:
         tmpl = json.loads(row[8])
@@ -185,10 +183,13 @@ def get_guild_config(guild_id: int):
         except Exception:
             p_roles = []
 
+    absen_ch_id = int(row[1]) if row[1] and row[1] != "None" else 0
+    rekap_ch_id = int(row[2]) if row[2] and row[2] != "None" else 0
+
     return {
         "guild_id": gid_str,
-        "absen_channel_id": int(row[1]) if row[1] else int(default_absen),
-        "rekap_channel_id": int(row[2]) if row[2] else int(default_rekap),
+        "absen_channel_id": absen_ch_id,
+        "rekap_channel_id": rekap_ch_id,
         "wajib_absen_roles": w_roles,
         "staff_roles": s_roles,
         "open_time": row[5] or "07:00",
@@ -820,20 +821,27 @@ async def config_show(interaction: discord.Interaction):
         return
 
     cfg = get_guild_config(interaction.guild.id)
-    absen_ch = interaction.guild.get_channel(cfg["absen_channel_id"])
-    rekap_ch = interaction.guild.get_channel(cfg["rekap_channel_id"])
+    guild = interaction.guild
 
-    wajib_roles_str = ", ".join([f"<@&{r}>" for r in cfg["wajib_absen_roles"]]) or "Belum diatur"
-    staff_roles_str = ", ".join([f"<@&{r}>" for r in cfg["staff_roles"]]) or "Belum diatur"
-    ping_roles_str = ", ".join([f"<@&{r}>" for r in cfg.get("ping_roles", [])]) or "Belum diatur"
+    absen_ch = guild.get_channel(cfg["absen_channel_id"]) if cfg["absen_channel_id"] else None
+    rekap_ch = guild.get_channel(cfg["rekap_channel_id"]) if cfg["rekap_channel_id"] else None
+
+    # Sanitasi Role: Hanya render role yang benar-benar ada di server ini
+    valid_wajib = [guild.get_role(r) for r in cfg["wajib_absen_roles"] if guild.get_role(r)]
+    valid_staff = [guild.get_role(r) for r in cfg["staff_roles"] if guild.get_role(r)]
+    valid_ping = [guild.get_role(r) for r in cfg.get("ping_roles", []) if guild.get_role(r)]
+
+    wajib_roles_str = ", ".join([r.mention for r in valid_wajib]) if valid_wajib else "Belum diatur"
+    staff_roles_str = ", ".join([r.mention for r in valid_staff]) if valid_staff else "Belum diatur"
+    ping_roles_str = ", ".join([r.mention for r in valid_ping]) if valid_ping else "Belum diatur"
 
     embed = discord.Embed(
         title=f"⚙️ Konfigurasi Server: {interaction.guild.name}",
         color=discord.Color.green(),
         timestamp=datetime.now(pytz.UTC)
     )
-    embed.add_field(name="Saluran Absensi", value=absen_ch.mention if absen_ch else f"ID: {cfg['absen_channel_id']}", inline=True)
-    embed.add_field(name="Saluran Rekap", value=rekap_ch.mention if rekap_ch else f"ID: {cfg['rekap_channel_id']}", inline=True)
+    embed.add_field(name="Saluran Absensi", value=absen_ch.mention if absen_ch else "Belum diatur", inline=True)
+    embed.add_field(name="Saluran Rekap", value=rekap_ch.mention if rekap_ch else "Belum diatur", inline=True)
     embed.add_field(name="Role Target Ping", value=ping_roles_str, inline=True)
     embed.add_field(name="Hari Awal Siklus", value=cfg["start_day"].capitalize(), inline=True)
     embed.add_field(name="Jadwal Otomatis (WIB)", value=f"Buka: `{cfg['open_time']}` | Tutup: `{cfg['close_time']}`", inline=True)
