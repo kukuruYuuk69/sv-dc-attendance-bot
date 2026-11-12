@@ -65,17 +65,24 @@ cursor.execute('''
         start_day TEXT,
         templates TEXT,
         ping_role_id TEXT,
-        ping_roles TEXT
+        ping_roles TEXT,
+        min_attendance_weekly INTEGER DEFAULT 3,
+        consecutive_threshold INTEGER DEFAULT 2
     )
 ''')
 conn.commit()
 
-# Pastikan kolom ping_roles ada
-try:
-    cursor.execute("ALTER TABLE guild_config ADD COLUMN ping_roles TEXT")
-    conn.commit()
-except Exception:
-    pass
+# Migrasi kolom baru jika tabel sudah ada sebelumnya
+for col_def in [
+    ("ping_roles", "TEXT"),
+    ("min_attendance_weekly", "INTEGER DEFAULT 3"),
+    ("consecutive_threshold", "INTEGER DEFAULT 2")
+]:
+    try:
+        cursor.execute(f"ALTER TABLE guild_config ADD COLUMN {col_def[0]} {col_def[1]}")
+        conn.commit()
+    except Exception:
+        pass
 
 # Default Universal Agnostic Templates
 DEFAULT_TEMPLATES = {
@@ -131,12 +138,14 @@ def get_guild_config(guild_id: int):
             "start_day": "monday",
             "templates": DEFAULT_TEMPLATES.copy(),
             "ping_role_id": None,
-            "ping_roles": default_ping_roles
+            "ping_roles": default_ping_roles,
+            "min_attendance_weekly": 3,
+            "consecutive_threshold": 2
         }
         cursor.execute(
             '''INSERT OR REPLACE INTO guild_config 
-               (guild_id, absen_channel_id, rekap_channel_id, wajib_absen_roles, staff_roles, open_time, close_time, start_day, templates, ping_role_id, ping_roles)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+               (guild_id, absen_channel_id, rekap_channel_id, wajib_absen_roles, staff_roles, open_time, close_time, start_day, templates, ping_role_id, ping_roles, min_attendance_weekly, consecutive_threshold)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (
                 gid_str,
                 str(cfg["absen_channel_id"]),
@@ -148,7 +157,9 @@ def get_guild_config(guild_id: int):
                 cfg["start_day"],
                 json.dumps(cfg["templates"]),
                 "",
-                json.dumps(cfg["ping_roles"])
+                json.dumps(cfg["ping_roles"]),
+                cfg["min_attendance_weekly"],
+                cfg["consecutive_threshold"]
             )
         )
         conn.commit()
@@ -185,6 +196,8 @@ def get_guild_config(guild_id: int):
 
     absen_ch_id = int(row[1]) if row[1] and row[1] != "None" else 0
     rekap_ch_id = int(row[2]) if row[2] and row[2] != "None" else 0
+    min_weekly = row[11] if len(row) > 11 and row[11] is not None else 3
+    cons_thresh = row[12] if len(row) > 12 and row[12] is not None else 2
 
     return {
         "guild_id": gid_str,
@@ -196,7 +209,9 @@ def get_guild_config(guild_id: int):
         "close_time": row[6] or "22:00",
         "start_day": row[7] or "monday",
         "templates": tmpl,
-        "ping_roles": p_roles
+        "ping_roles": p_roles,
+        "min_attendance_weekly": min_weekly,
+        "consecutive_threshold": cons_thresh
     }
 
 # Helper: Update Konfigurasi Dinamis Guild
@@ -214,7 +229,9 @@ def update_guild_config(guild_id: int, key: str, value):
            close_time = ?,
            start_day = ?,
            templates = ?,
-           ping_roles = ?
+           ping_roles = ?,
+           min_attendance_weekly = ?,
+           consecutive_threshold = ?
            WHERE guild_id = ?''',
         (
             str(cfg["absen_channel_id"]),
@@ -226,6 +243,8 @@ def update_guild_config(guild_id: int, key: str, value):
             cfg["start_day"],
             json.dumps(cfg["templates"]),
             json.dumps(cfg["ping_roles"]),
+            cfg["min_attendance_weekly"],
+            cfg["consecutive_threshold"],
             str(guild_id)
         )
     )
@@ -533,6 +552,7 @@ async def slash_tutup_absen(interaction: discord.Interaction):
 # Helper Pembagian Halaman Rekapitulasi Mingguan
 def build_recap_pages(guild: discord.Guild, cfg: dict):
     start_date, end_date, current_week_key = get_week_cycle_bounds(cfg["start_day"])
+    min_attendance = cfg.get("min_attendance_weekly", 3)
 
     # Cari seluruh member yang memiliki salah satu role wajib absen
     target_members = []
@@ -554,7 +574,7 @@ def build_recap_pages(guild: discord.Guild, cfg: dict):
 
     for m in target_members:
         c = attendance_map.get(str(m.id), 0)
-        if c >= 3:
+        if c >= min_attendance:
             normal_list.append((m, c))
         else:
             violating_list.append((m, c))
@@ -570,7 +590,7 @@ def build_recap_pages(guild: discord.Guild, cfg: dict):
         description=(
             f"**Periode Siklus:** `{start_date}` s/d `{end_date}`\n"
             f"**Total Anggota Wajib Absen:** {len(target_members)} Orang\n"
-            f"**Standar Kehadiran:** Minimal 3x Hadir\n"
+            f"**Standar Kehadiran:** Minimal {min_attendance}x Hadir\n"
             f"**Hari Awal Siklus:** {cfg['start_day'].capitalize()}"
         ),
         color=discord.Color.blue(),
@@ -578,23 +598,23 @@ def build_recap_pages(guild: discord.Guild, cfg: dict):
     )
 
     disciplined_lines = [f"✅ **{m.mention}** (`{m.display_name}`): **{c}x** Hadir" for m, c in normal_list]
-    chunk_text = "\n".join(disciplined_lines[:25]) if disciplined_lines else "Belum ada anggota yang mencapai 3x hadir."
-    embed1.add_field(name=f"🟢 Anggota Memenuhi Standar (>= 3x) — [{len(normal_list)}]", value=chunk_text[:1024], inline=False)
+    chunk_text = "\n".join(disciplined_lines[:25]) if disciplined_lines else f"Belum ada anggota yang mencapai {min_attendance}x hadir."
+    embed1.add_field(name=f"🟢 Anggota Memenuhi Standar (>= {min_attendance}x) — [{len(normal_list)}]", value=chunk_text[:1024], inline=False)
     if len(disciplined_lines) > 25:
         embed1.add_field(name="🟢 Anggota Memenuhi Standar (Lanjutan)", value="\n".join(disciplined_lines[25:50])[:1024], inline=False)
     embed1.set_footer(text="Sistem Rekapitulasi Presensi • Halaman 1")
     pages.append(embed1)
 
-    # Halaman 2: Anggota Kurang dari 3x Hadir
+    # Halaman 2: Anggota Kurang dari Standar Hadir
     embed2 = discord.Embed(
-        title="⚠️ DAFTAR ANGGOTA KURANG DARI 3X HADIR",
-        description=f"Anggota berikut belum memenuhi standar kehadiran pada periode `{start_date}` s/d `{end_date}`.",
+        title=f"⚠️ DAFTAR ANGGOTA KURANG DARI {min_attendance}X HADIR",
+        description=f"Anggota berikut belum memenuhi standar kehadiran minimal ({min_attendance}x) pada periode `{start_date}` s/d `{end_date}`.",
         color=discord.Color.gold(),
         timestamp=datetime.now(pytz.UTC)
     )
     viol_lines = [f"⚠️ **{m.mention}** (`{m.display_name}`): Hanya **{c}x** Hadir" for m, c in violating_list]
     viol_chunk = "\n".join(viol_lines[:25]) if viol_lines else "Seluruh anggota memenuhi standar minimal!"
-    embed2.add_field(name=f"🟡 Anggota Perlu Tindak Lanjut (< 3x) — [{len(violating_list)}]", value=viol_chunk[:1024], inline=False)
+    embed2.add_field(name=f"🟡 Anggota Perlu Tindak Lanjut (< {min_attendance}x) — [{len(violating_list)}]", value=viol_chunk[:1024], inline=False)
     if len(viol_lines) > 25:
         embed2.add_field(name="🟡 Anggota Perlu Tindak Lanjut (Lanjutan)", value="\n".join(viol_lines[25:50])[:1024], inline=False)
     embed2.set_footer(text="Sistem Rekapitulasi Presensi • Halaman 2")
@@ -710,7 +730,41 @@ async def slash_reject(interaction: discord.Interaction, member: discord.Member,
         fields={"Member": member.name, "Staff": interaction.user.name, "Alasan": alasan}
     )
 
-# 6. /help
+# 6. /reset_user
+@bot.tree.command(name="reset_user", description="Reset riwayat absensi dan pelanggaran member baru agar terhindar dari akumulasi sanksi.")
+@app_commands.describe(member="Member baru yang ingin di-refresh riwayatnya")
+async def slash_reset_user(interaction: discord.Interaction, member: discord.Member):
+    if not check_is_staff(interaction):
+        await interaction.response.send_message("❌ Anda tidak memiliki izin untuk mereset riwayat user.", ephemeral=True)
+        return
+
+    uid_str = str(member.id)
+    cursor.execute("DELETE FROM attendance WHERE user_id = ?", (uid_str,))
+    cursor.execute("DELETE FROM weekly_recap WHERE user_id = ?", (uid_str,))
+    conn.commit()
+
+    embed = discord.Embed(
+        title="🔄 Reset Riwayat Anggota Berhasil",
+        description=(
+            f"Seluruh catatan riwayat absensi dan akumulasi sanksi mingguan untuk "
+            f"**{member.mention}** (`{member.display_name}`) telah dibersihkan.\n\n"
+            f"Anggota kini memulai siklus presensi dengan status riwayat bersih (*fresh state*)."
+        ),
+        color=discord.Color.green(),
+        timestamp=datetime.now(pytz.UTC)
+    )
+    embed.set_footer(text=f"Dieksekusi oleh staf: {interaction.user.display_name}")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await send_audit_log(
+        interaction.guild,
+        "🔄 Riwayat Member Di-reset",
+        f"Staf {interaction.user.mention} mereset seluruh data riwayat untuk {member.mention}.",
+        color=discord.Color.blue(),
+        fields={"Member Target": f"{member.name} ({member.id})", "Staff": interaction.user.name}
+    )
+
+# 7. /help
 @bot.tree.command(name="help", description="Panduan lengkap seluruh fitur dan Slash Commands bot.")
 async def slash_help(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -725,7 +779,8 @@ async def slash_help(interaction: discord.Interaction):
             "`/tutup_absen` — Menutup sesi absen manual dan mengirim pesan penutupan.\n"
             "`/rekap` — Menampilkan rekapitulasi kehadiran mingguan berhalaman (Embed pagination).\n"
             "`/tegur` — Mengirim surat teguran resmi kepada anggota yang melanggar.\n"
-            "`/reject` — Membatalkan kehadiran member hari ini seketika."
+            "`/reject` — Membatalkan kehadiran member hari ini seketika.\n"
+            "`/reset_user` — Reset data absen & akumulasi pelanggaran member baru."
         ),
         inline=False
     )
@@ -733,6 +788,7 @@ async def slash_help(interaction: discord.Interaction):
         name="⚙️ Perintah Konfigurasi Server (`/config`)",
         value=(
             "`/config show` — Tampilkan seluruh pengaturan dinamis server aktif.\n"
+            "`/config ambang_batas` — Atur minimal absen per minggu & ambang surat peringatan.\n"
             "`/config ping_role` — Tambah atau hapus role target mention baris ping template.\n"
             "`/config role_absen` — Tambah atau hapus role wajib absen.\n"
             "`/config role_staff` — Tambah atau hapus role staf pengawas (Admin/Mod).\n"
@@ -845,10 +901,49 @@ async def config_show(interaction: discord.Interaction):
     embed.add_field(name="Role Target Ping", value=ping_roles_str, inline=True)
     embed.add_field(name="Hari Awal Siklus", value=cfg["start_day"].capitalize(), inline=True)
     embed.add_field(name="Jadwal Otomatis (WIB)", value=f"Buka: `{cfg['open_time']}` | Tutup: `{cfg['close_time']}`", inline=True)
+    embed.add_field(
+        name="Ambang Batas Kehadiran",
+        value=f"Minimal: **{cfg.get('min_attendance_weekly', 3)}x**/minggu | Sanksi: **{cfg.get('consecutive_threshold', 2)}** minggu berturut",
+        inline=True
+    )
     embed.add_field(name="Role Wajib Absen", value=wajib_roles_str, inline=False)
     embed.add_field(name="Role Staf Pengawas", value=staff_roles_str, inline=False)
     embed.set_footer(text="Gunakan sub-command /config untuk mengubah pengaturan")
 
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@config_group.command(name="ambang_batas", description="Atur minimal kehadiran mingguan dan ambang minggu berturut-turut untuk sanksi.")
+@app_commands.describe(
+    minimal_absen="Jumlah minimum kehadiran per minggu (contoh: 3)",
+    minggu_beruntun="Ambang minggu berturut-turut melanggar sebelum Surat Peringatan (contoh: 2)"
+)
+async def config_ambang_batas(interaction: discord.Interaction, minimal_absen: int, minggu_beruntun: int):
+    if not check_is_staff(interaction):
+        await interaction.response.send_message("❌ Anda tidak memiliki izin.", ephemeral=True)
+        return
+
+    if minimal_absen < 1 or minimal_absen > 7:
+        await interaction.response.send_message("❌ Minimal absen harus berada di antara 1 hingga 7 hari.", ephemeral=True)
+        return
+
+    if minggu_beruntun < 1 or minggu_beruntun > 10:
+        await interaction.response.send_message("❌ Ambang minggu berturut-turut harus berada di antara 1 hingga 10.", ephemeral=True)
+        return
+
+    update_guild_config(interaction.guild.id, "min_attendance_weekly", minimal_absen)
+    update_guild_config(interaction.guild.id, "consecutive_threshold", minggu_beruntun)
+
+    embed = discord.Embed(
+        title="✅ Ambang Batas Kehadiran & Sanksi Diperbarui",
+        description=(
+            f"Pengaturan kedisiplinan server berhasil disimpan:\n\n"
+            f"• **Minimal Kehadiran:** `{minimal_absen}x` per minggu\n"
+            f"• **Pemicu Surat Peringatan:** `{minggu_beruntun}` minggu berturut-turut di bawah target\n\n"
+            f"Sistem rekap mingguan akan menggunakan parameter baru ini secara dinamis."
+        ),
+        color=discord.Color.green(),
+        timestamp=datetime.now(pytz.UTC)
+    )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @config_group.command(name="role_staff", description="Pilih role staf pengawas bot melalui menu interaktif (Multi-Select).")
@@ -1057,7 +1152,7 @@ async def check_dynamic_schedules():
                         rekap_channel = guild.get_channel(cfg["rekap_channel_id"])
                         if rekap_channel:
                             try:
-                                pages, _, _, violating_list = build_recap_pages(guild, cfg)
+                                pages, target_members, normal_list, violating_list = build_recap_pages(guild, cfg)
                                 if pages:
                                     # Kirim Embed Halaman 1 (Ringkasan)
                                     await rekap_channel.send(embed=pages[0])
@@ -1065,15 +1160,64 @@ async def check_dynamic_schedules():
                                     if len(pages) > 1 and violating_list:
                                         await rekap_channel.send(embed=pages[1])
 
-                                    # Notifikasi mention staf pengawas jika terdapat anggota melanggar (<3x)
+                                    # Update database weekly_recap & cek consecutive violations
+                                    start_date, end_date, current_week_key = get_week_cycle_bounds(cfg["start_day"])
+                                    cons_thresh = cfg.get("consecutive_threshold", 2)
+                                    min_attendance = cfg.get("min_attendance_weekly", 3)
+                                    sp_triggered_members = []
+
+                                    for m, cnt in normal_list:
+                                        cursor.execute(
+                                            "INSERT OR REPLACE INTO weekly_recap (user_id, week_key, attendance_count, is_violation, consecutive_violations) VALUES (?, ?, ?, 0, 0)",
+                                            (str(m.id), current_week_key, cnt)
+                                        )
+
+                                    for m, cnt in violating_list:
+                                        # Cari riwayat consecutive violations sebelumnya
+                                        cursor.execute(
+                                            "SELECT consecutive_violations FROM weekly_recap WHERE user_id = ? AND week_key != ? ORDER BY week_key DESC LIMIT 1",
+                                            (str(m.id), current_week_key)
+                                        )
+                                        last_row = cursor.fetchone()
+                                        last_streak = last_row[0] if last_row and last_row[0] is not None else 0
+                                        new_streak = last_streak + 1
+
+                                        cursor.execute(
+                                            "INSERT OR REPLACE INTO weekly_recap (user_id, week_key, attendance_count, is_violation, consecutive_violations) VALUES (?, ?, ?, 1, ?)",
+                                            (str(m.id), current_week_key, cnt, new_streak)
+                                        )
+
+                                        if new_streak >= cons_thresh:
+                                            sp_triggered_members.append((m, cnt, new_streak))
+
+                                    conn.commit()
+
+                                    # Notifikasi mention staf pengawas jika terdapat anggota melanggar (<min_attendance)
                                     ping_mentions = get_ping_roles_mentions(cfg.get("ping_roles", []))
                                     if violating_list and ping_mentions:
                                         viol_mentions = " ".join([m.mention for m, _ in violating_list])
                                         await rekap_channel.send(
                                             f"⚠️ **EVALUASI KEDISIPLINAN MINGGUAN** ⚠️\n"
-                                            f"Anggota berikut tercatat kurang dari 3x hadir pada siklus ini: {viol_mentions}\n"
+                                            f"Anggota berikut tercatat kurang dari {min_attendance}x hadir pada siklus ini: {viol_mentions}\n"
                                             f"Pemberitahuan kepada Staf Pengawas: {ping_mentions}"
                                         )
+
+                                    # Jika ada anggota yang mencapai ambang konsektif surat peringatan
+                                    if sp_triggered_members:
+                                        sp_mentions = ", ".join([f"{m.mention} ({streak} minggu)" for m, _, streak in sp_triggered_members])
+                                        sp_text = get_rendered_template_text(cfg, "peringatan", DEFAULT_TEMPLATES["peringatan"])
+                                        sp_embed = discord.Embed(
+                                            title="🚨 SURAT PERINGATAN KEDISIPLINAN OTOMATIS",
+                                            description=(
+                                                f"{sp_text}\n\n"
+                                                f"**Anggota Mencapai Ambang Batas Pelanggaran ({cons_thresh} Minggu Berturut-turut):**\n"
+                                                f"{sp_mentions}\n\n"
+                                                f"⚠️ *Harap segera menghadap Staf Pengawas / Divisi Kedisiplinan.*"
+                                            ),
+                                            color=discord.Color.red(),
+                                            timestamp=datetime.now(pytz.UTC)
+                                        )
+                                        await rekap_channel.send(content=f"{ping_mentions}".strip(), embed=sp_embed)
                             except Exception as e_rekap:
                                 print(f"Error eksekusi rekap mingguan otomatis di {guild.name}: {e_rekap}")
         except Exception as e:
@@ -1114,6 +1258,23 @@ async def on_message(message: discord.Message):
         is_wajib = any(role.id in cfg["wajib_absen_roles"] for role in message.author.roles)
 
         if is_wajib:
+            # Validasi Paling Awal: Cegah Double Absen di Tanggal yang Sama
+            cursor.execute("SELECT 1 FROM attendance WHERE user_id = ? AND date = ?", (str(message.author.id), today_str))
+            if cursor.fetchone():
+                await message.delete()
+                await message.channel.send(
+                    f"⚠️ {message.author.mention} Anda sudah mengisi absensi kehadiran untuk hari ini (`{today_str}`). Double absen tidak diperbolehkan!",
+                    delete_after=15
+                )
+                await send_audit_log(
+                    message.guild,
+                    "⚠️ Double Absen Ditolak",
+                    f"{message.author.mention} mencoba mengisi absen lebih dari sekali pada tanggal `{today_str}`. Pesan otomatis dihapus.",
+                    color=discord.Color.gold(),
+                    fields={"Member": f"{message.author.name} ({message.author.id})", "Tanggal": today_str}
+                )
+                return
+
             content = message.content
             normalized_content = content.replace("`", "")
 
@@ -1165,7 +1326,15 @@ async def on_message(message: discord.Message):
                 fields={"Member": f"{message.author.name} ({message.author.id})", "Tanggal": today_str}
             )
 
-            # Kirim Template Absen Baru di Bawahnya
+            # Bersihkan template lama dari bot di channel absensi (agar channel rapi)
+            try:
+                async for prev_msg in message.channel.history(limit=10):
+                    if prev_msg.author.id == bot.user.id and "TEMPLATE ABSENSI" in prev_msg.content.upper():
+                        await prev_msg.delete()
+            except Exception as e_clean:
+                print(f"Gagal membersihkan template lama: {e_clean}")
+
+            # Kirim Template Absen Baru di Posisi Paling Bawah
             new_template_hint = render_attendance_template(cfg)
             await message.channel.send(new_template_hint)
 
@@ -1226,6 +1395,10 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         f"karena foto/ketentuan tidak sesuai. Silakan kirim ulang absensi yang benar.\n{ping_mentions}".strip(),
         delete_after=20
     )
+
+    # Pastikan template form absensi tetap tersedia di bawah
+    new_template_hint = render_attendance_template(cfg)
+    await channel.send(new_template_hint)
 
     await send_audit_log(
         guild,
