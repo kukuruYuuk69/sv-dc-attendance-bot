@@ -1,63 +1,72 @@
-# REQUIREMENTS SPECIFICATION: DUPLICATE CHECK, DYNAMIC REFRESH & PENALTY THRESHOLD
+# REQUIREMENTS DOCUMENT: MIGRASI RUNNER / HOSTING BOT KE GITHUB ACTIONS
 
-## 1. Pendahuluan
-Dokumen ini mendefinisikan kebutuhan sistem lanjutan untuk bot presensi `sv-dc-attendance-bot`, mencakup penegakan aturan anti-double absen harian, otomatisasi siklus template dinamis yang bersih di channel, perlakuan khusus bagi member baru melalui reset riwayat absensi, serta fleksibilitas pengaturan ambang batas sanksi/teguran mingguan.
+## 1. Pendahuluan & Latar Belakang
+Bot Discord Absensi Presensi (`sv-dc-attendance-bot`) saat ini berjalan pada lingkungan lokal pengembang. Untuk menjamin ketersediaan layanan (*high availability*), automasi CI/CD, dan operasional tanpa ketergantungan pada perangkat lokal yang menyala terus-menerus, sistem dipersiapkan untuk dapat dijalankan atau di-*deploy* melalui GitHub Actions.
 
----
-
-## 2. Kebutuhan Sistem Lanjutan
-
-### 2.1 Pencegahan Double Absen Harian (Anti-Duplicate Check)
-- **Aturan Sistem:**
-  - Satu user hanya diizinkan memiliki 1 kali status absensi sukses per hari (berdasarkan penanggalan WIB `YYYY-MM-DD`).
-- **Logika Validasi:**
-  - Sebelum memvalidasi format form atau lampiran gambar, bot memeriksa tabel `attendance` dengan query `WHERE user_id = ? AND date = ?`.
-  - Jika data kehadiran user untuk hari tersebut sudah tercatat:
-    1. Pesan baru user **otomatis dihapus seketika** (`message.delete()`).
-    2. Bot mengirimkan pesan peringatan penolakan di channel absensi (men-tag user bersangkutan) yang menyatakan bahwa user sudah berhasil absen hari ini dan tidak diperbolehkan mengirim absen ganda.
-    3. Pesan peringatan otomatis terhapus dalam waktu singkat (misal: 15 detik) untuk menjaga kebersihan saluran.
-
-### 2.2 Siklus Pembaruan Template Dinamis (Clean Channel Lifecycle)
-- **Skenario 1: Absen Sukses (`✅`):**
-  - Ketika absen user valid dan dicatat ke database:
-    1. Bot memberikan reaksi centang `✅` pada pesan user.
-    2. Bot otomatis mengirimkan pesan template absensi baru di bawahnya agar template selalu berada di bagian terbawah aktivitas obrolan.
-    3. *(Opsional/Pembersihan):* Bot dapat melacak dan menghapus template perantara sebelumnya agar tidak terjadi penumpukan template kosong di channel.
-- **Skenario 2: Intervensi Reaksi Silang Staf (`❌`):**
-  - Jika staf/pengawas memberikan reaksi `❌` pada pesan absen user:
-    1. Data absensi user untuk hari tersebut dihapus dari database `attendance`.
-    2. Pesan user yang disilang langsung dihapus seketika.
-    3. Bot mengirimkan notifikasi penolakan (alasan foto/ketentuan tidak sesuai) yang hilang dalam 20 detik.
-    4. Bot memastikan template absensi bersih tetap tersedia di posisi paling bawah saluran.
-
-### 2.3 Reset Riwayat Absensi Member Baru (Refresh User Database)
-- **Latar Belakang Masalah:**
-  - Member baru yang baru bergabung di pertengahan minggu berisiko langsung terhitung melanggar (<3x hadir) atau terkena akumulasi alpha saat rekapitulasi akhir siklus dijalankan.
-- **Kebutuhan Fitur:**
-  - Tambahkan perintah staf (misal: `/config reset_user member:@User` atau `/reset_absen member:@User`):
-    - Menghapus riwayat absensi dan catatan pelanggaran mingguan (`weekly_recap`) member tersebut.
-    - Memberikan catatan "Fresh Start" sehingga member baru tidak langsung terkena penalti/teguran pada minggu pertama bergabung.
-    - Mengirim konfirmasi tindakan staf dan mencatatnya ke audit log.
-
-### 2.4 Konfigurasi Ambang Batas Teguran & Pelanggaran Beruntun (Configurable Thresholds)
-- **Latar Belakang:**
-  - Nilai standar minimal 3x absen per minggu dan ambang 2 minggu berturut-turut saat ini masih bersifat *hardcode*.
-- **Kebutuhan Fitur:**
-  - Tambahkan kolom konfigurasi pada tabel `guild_config`:
-    - `min_attendance_weekly`: Jumlah minimal kehadiran per minggu (default: `3`).
-    - `consecutive_threshold`: Jumlah minggu berturut-turut yang memicu Surat Teguran/Peringatan Keras (default: `2`).
-  - Tambahkan sub-command `/config ambang_batas` (atau integrasi pada `/config`):
-    - Parameter: `minimal_absen: int` (rentang 1–7) dan `minggu_beruntun: int` (rentang 1–4).
-  - Sistem rekapitulasi mingguan dan evaluasi kedisiplinan wajib membaca nilai ambang batas ini secara dinamis dari database server.
+Dokumen ini menganalisis arsitektur, kebutuhan sistem, manajemen rahasia (*secrets*), dan tantangan persistensi data saat menjalankan Discord bot berbasis Python & SQLite pada GitHub Actions runner.
 
 ---
 
-## 3. Matriks Kebutuhan Fungsional
+## 2. Analisis Kebutuhan Sistem & Karakteristik Runner GitHub Actions
 
-| ID Kebutuhan | Komponen | Deskripsi Singkat | Prioritas |
-| :--- | :--- | :--- | :---: |
-| **REQ-DUP-01** | `on_message` | Tolak & hapus pesan jika user sudah tercatat absen di hari yang sama. | Tinggi |
-| **REQ-TMP-01** | `on_message` & `reaction` | Otomatis refresh template baru setelah sukses absen & setelah reaksi ❌. | Tinggi |
-| **REQ-USR-01** | Slash Command | `/reset_user` untuk me-refresh riwayat kehadiran & rekap member baru. | Sedang |
-| **REQ-CFG-01** | `guild_config` | Simpan `min_attendance_weekly` dan `consecutive_threshold` dinamis. | Tinggi |
-| **REQ-CFG-02** | `/config ambang_batas` | Command staf untuk mengatur batas minimal kehadiran & minggu sanksi. | Sedang |
+### 2.1 Sifat Lingkungan GitHub Actions Runner
+- **Ephemeral Virtual Machine (VM)**: Lingkungan runner GitHub Actions (seperti `ubuntu-latest`) bersifat *stateless* dan *ephemeral*. Saat job atau workflow selesai, seluruh VM akan dihapus beserta seluruh sistem berkas lokalnya.
+- **Batas Waktu Eksekusi (Execution Timeout)**:
+  - Default maksimum eksekusi untuk satu job GitHub Actions adalah **6 jam (360 menit)**.
+  - Untuk bot yang memerlukan koneksi WebSocket Gateway Discord 24/7, GitHub Actions perlu dievaluasi antara:
+    1. Pola **Scheduled Re-trigger / Heartbeat Loop** (cron workflow yang me-restart job setiap interval tertentu sebelum batas 6 jam tercapai).
+    2. Pola **Automated Continuous Deployment (CD)** ke platform PaaS/VPS eksternal (seperti Railway, Render, Fly.io, Oracle Cloud VM, atau Self-Hosted Runner).
+    3. Pola **Self-Hosted Runner GitHub Actions** yang terhubung ke server/VPS pribadi pengguna.
+
+### 2.2 Kebutuhan Utama
+1. **Automasi Eksekusi**: File workflow YAML yang mendefinisikan langkah setup Python, dependensi, dan runtime execution.
+2. **Kepatuhan CI**: Verifikasi sintaks kode (`python -m py_compile bot.py`) sebelum bot dijalankan untuk mencegah kegagalan runtime akibat kesalahan penulisan kode.
+3. **Standarisasi Dependensi**: Menyediakan file `requirements.txt` yang berisi library spesifik (`discord.py`, `pytz`, `python-dotenv`) agar instalasi di VM runner konsisten dan cepat.
+
+---
+
+## 3. Standar Keamanan & Manajemen Kredensial (GitHub Repository Secrets)
+
+### 3.1 Penghapusan Ketergantungan File `.env` Lokal
+- File `.env` lokal tidak boleh di-commit ke repositori publik maupun privat.
+- Seluruh variabel lingkungan wajib disuntikkan secara dinamis saat workflow dijalankan melalui `env:` block yang membaca GitHub Repository Secrets.
+
+### 3.2 Daftar Kredensial & Secrets Wajib
+| Nama Secret GitHub | Variabel Environment Bot | Keterangan | Tingkat Kerahasiaan |
+| :--- | :--- | :--- | :--- |
+| `DISCORD_TOKEN` | `DISCORD_BOT_TOKEN` | Token Bot Discord dari Discord Developer Portal | Kritis (Jangan bocor) |
+| `LOG_CHANNEL_ID` | `LOG_CHANNEL_ID` | ID Text Channel untuk pengiriman log audit otomatis | Opsional / Publik Server |
+
+### 3.3 Prinsip Keamanan Lingkungan Runner
+- Runner tidak boleh menampilkan atau me-log nilai secret ke konsol (`echo` token dilarang keras).
+- Token hanya diekspos ke proses Python runtime saat langkah eksekusi berlangsung.
+
+---
+
+## 4. Persistensi Database SQLite pada Lingkungan Runner
+
+### 4.1 Tantangan Persistensi SQLite
+Database `attendance.db` menyimpan 3 tabel krusial:
+1. `attendance`: Riwayat absensi harian per user dan tanggal.
+2. `weekly_recap`: Catatan pelanggaran dan akumulasi sanksi mingguan.
+3. `guild_config`: Pengaturan dinamis per server (jadwal buka/tutup, channel, role staf/absen/ping, ambang batas).
+
+Karena disk runner GitHub Actions bersifat *ephemeral*, file `attendance.db` akan hilang jika tidak ada mekanisme persistensi antar-eksekusi.
+
+### 4.2 Strategi Solusi Persistensi
+Untuk menjamin kesinambungan data pada GitHub Actions runner:
+1. **Penyimpanan State via GitHub Branch Khusus / Auto-Commit (Database State Branch)**:
+   - Sebelum runner dimatikan atau saat jadwal interval tertentu, workflow melakukan commit aman terhadap file `attendance.db` ke branch khusus (misal branch `db-data` atau branch terisolasi) menggunakan bot GitHub token (`GITHUB_TOKEN`).
+   - Saat runner baru menyala, runner menarik (*fetch/checkout*) file `attendance.db` terakhir dari branch data tersebut sebelum menyalakan bot.
+2. **Penyimpanan State via GitHub Actions Artifacts / Cache**:
+   - Memanfaatkan aksi `actions/cache` atau `actions/upload-artifact` dan `actions/download-artifact` untuk memuat dan menyimpan file `attendance.db` antar siklus workflow.
+3. **Alternatif Database Cloud (Jangka Panjang)**:
+   - Mendukung integrasi masa depan ke database tersentralisasi berbasis cloud (seperti PostgreSQL / Supabase / Turso libSQL SQLite Cloud) yang tidak bergantung pada VM lokal runner.
+
+---
+
+## 5. Ringkasan Kriteria Keberhasilan (Acceptance Criteria)
+1. Tersedianya file `requirements.txt` yang rapi dan tervalidasi.
+2. Tersedianya file workflow GitHub Actions di `.github/workflows/` yang mampu menginstal dependensi dan memverifikasi integritas kode.
+3. Penyusunan instruksi detail bagi admin/pemilik repo untuk mendaftarkan `DISCORD_TOKEN` di menu GitHub Repository Secrets.
+4. Bot dapat membaca token dari Secrets tanpa mengalami *crash* atau error missing environment.
