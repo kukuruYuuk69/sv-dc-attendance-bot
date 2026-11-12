@@ -64,63 +64,46 @@ cursor.execute('''
         close_time TEXT,
         start_day TEXT,
         templates TEXT,
-        ping_role_id TEXT
+        ping_role_id TEXT,
+        ping_roles TEXT
     )
 ''')
 conn.commit()
 
-# Pastikan kolom ping_role_id ada jika database lama
+# Pastikan kolom ping_roles ada
 try:
-    cursor.execute("ALTER TABLE guild_config ADD COLUMN ping_role_id TEXT")
+    cursor.execute("ALTER TABLE guild_config ADD COLUMN ping_roles TEXT")
     conn.commit()
 except Exception:
     pass
 
-# Default Templates
+# Default Universal Agnostic Templates
 DEFAULT_TEMPLATES = {
     "absen_fields": (
         "Nama: \n"
-        "Pangkat: \n"
-        "Job: \n"
         "Divisi: \n"
         "Status: Hadir\n"
-        "Ping: <@&{ping_role_id}>"
+        "Ping: {ping_roles_mentions}"
     ),
     "opening": (
-        "⏰ 【 SINYAL DINAS ON DUTY DIMULAI 】⏰\n\n"
-        "Perhatian seluruh anggota PASPAMPRES,\n"
-        "waktu dinas telah dimulai. Segera siapkan diri dan fokus pada pelaksanaan tugas.\n"
-        "```- Wajib menjaga disiplin tanpa pengecualian\n"
-        "- Patuh mutlak terhadap perintah atasan\n"
-        "- Jaga kehormatan dan nama baik paspampres\n"
-        "- Tidak mentolerir pelanggaran dalam bentuk apapun\n"
-        "- Laksanakan tugas dengan sigap, tepat, dan bertanggung jawab```\n"
-        "⚠️ Setiap pelanggaran akan ditindak sesuai aturan yang berlaku.\n\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "📢 PELAPORAN:\n"
-        "Apabila terdapat personel masalah atau tidak sesuai aturan.\n"
-        "segera laporkan ke <@&1500812071024197682> <@&1500811613794599022> \n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "_\"DISIPLIN ADALAH KEHORMATAN.\n"
-        "LOYALITAS ADALAH TANGGUNG JAWAB.\n"
-        "PROFESIONALISME ADALAH JATI DIRI.\"_\n\n"
-        "Setia, waspada, jujur dan tanggung jawab.\n\n"
-        "<@&1500083857591107744>"
+        "⏰ 【 SESI ABSENSI HARIAN DIMULAI 】⏰\n\n"
+        "Perhatian seluruh anggota,\n"
+        "Sesi absensi dan dinas telah dibuka. Segera lengkapi presensi kehadiran sesuai ketentuan.\n"
+        "```- Pastikan melampirkan screenshot / bukti kehadiran\n"
+        "- Gunakan template presensi yang ditentukan\n"
+        "- Laporkan kendala langsung kepada staf pengawas```\n"
+        "⚠️ Harap menjaga kedisiplinan dan ketertiban bersama."
     ),
     "closing": (
-        "# 【 WAKTU ISTIRAHAT TELAH TIBA 】\n\n"
-        "Seluruh personel Paspampres ANS dipersilakan mengakhiri aktivitas dan memasuki waktu istirahat.\n\n"
-        "```- Gunakan waktu malam untuk memulihkan energi\n"
-        "- Hindari aktivitas yang mengganggu kesiapan esok hari\n"
-        "- Jaga sikap dan ketertiban di lingkungan masing-masing\n"
-        "- Pastikan kesiapan untuk pelaksanaan dinas berikutnya```\n"
+        "# 【 SESI ABSENSI HARIAN TELAH BERAKHIR 】\n\n"
+        "Sesi absensi hari ini telah resmi ditutup.\n\n"
+        "```- Terima kasih atas partisipasi dan kedisiplinan Anda hari ini\n"
+        "- Pastikan kesiapan untuk jadwal dinas berikutnya```\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "💤 Istirahat yang cukup adalah bagian dari kesiapan tempur.\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "<@&1500083857591107744>"
+        "💤 Istirahat yang cukup untuk menjaga produktivitas."
     ),
-    "teguran": "⚠️ Surat Teguran Kedisiplinan Resmi dari Komando Pengawas PASPAMPRES.",
-    "peringatan": "🚨 PERINGATAN KEDISIPLINAN: Tidak memenuhi standar kehadiran minimal!"
+    "teguran": "⚠️ Surat Teguran Kedisiplinan Resmi dari Staf Pengawas.",
+    "peringatan": "🚨 PERINGATAN KEDISIPLINAN: Belum memenuhi standar kehadiran minimal!"
 }
 
 # Helper: Ambil Konfigurasi Dinamis Guild
@@ -129,14 +112,14 @@ def get_guild_config(guild_id: int):
     cursor.execute("SELECT * FROM guild_config WHERE guild_id = ?", (gid_str,))
     row = cursor.fetchone()
 
-    # Fallback default dari environment / PASPAMPRES
+    # Fallback default dari environment
     default_absen = os.getenv("ABSEN_CHANNEL_ID", "1570440259316088953")
     default_rekap = os.getenv("REKAP_CHANNEL_ID", "1570460912572178443")
     default_wajib_roles = [int(os.getenv("ROLE_WAJIB_ABSEN_ID", "1500083857591107744"))]
     default_staff_roles = [
         int(r.strip()) for r in os.getenv("ROLE_MODERATOR_IDS", "1500812071024197682,1500811613794599022").split(",") if r.strip()
     ]
-    default_ping_role = default_staff_roles[0] if default_staff_roles else 1500812071024197682
+    default_ping_roles = default_staff_roles.copy()
 
     if not row:
         cfg = {
@@ -149,12 +132,13 @@ def get_guild_config(guild_id: int):
             "close_time": "22:00",
             "start_day": "monday",
             "templates": DEFAULT_TEMPLATES.copy(),
-            "ping_role_id": default_ping_role
+            "ping_role_id": default_ping_roles[0] if default_ping_roles else None,
+            "ping_roles": default_ping_roles
         }
         cursor.execute(
             '''INSERT OR REPLACE INTO guild_config 
-               (guild_id, absen_channel_id, rekap_channel_id, wajib_absen_roles, staff_roles, open_time, close_time, start_day, templates, ping_role_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+               (guild_id, absen_channel_id, rekap_channel_id, wajib_absen_roles, staff_roles, open_time, close_time, start_day, templates, ping_role_id, ping_roles)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (
                 gid_str,
                 str(cfg["absen_channel_id"]),
@@ -165,13 +149,14 @@ def get_guild_config(guild_id: int):
                 cfg["close_time"],
                 cfg["start_day"],
                 json.dumps(cfg["templates"]),
-                str(cfg["ping_role_id"])
+                str(cfg["ping_role_id"]) if cfg["ping_role_id"] else "",
+                json.dumps(cfg["ping_roles"])
             )
         )
         conn.commit()
         return cfg
 
-    # Parse existing row
+    # Parse JSON kolom
     try:
         w_roles = [int(x) for x in json.loads(row[3])]
     except Exception:
@@ -187,13 +172,20 @@ def get_guild_config(guild_id: int):
     except Exception:
         tmpl = DEFAULT_TEMPLATES.copy()
 
-    # Pastikan ping_role_id ada
-    ping_role = default_ping_role
-    if len(row) > 9 and row[9]:
+    # Parse ping_roles (multi-role)
+    p_roles = []
+    if len(row) > 10 and row[10]:
         try:
-            ping_role = int(row[9])
+            p_roles = [int(x) for x in json.loads(row[10])]
         except Exception:
-            ping_role = default_ping_role
+            p_roles = []
+    if not p_roles and len(row) > 9 and row[9]:
+        try:
+            p_roles = [int(row[9])]
+        except Exception:
+            p_roles = default_ping_roles
+    if not p_roles:
+        p_roles = default_ping_roles
 
     return {
         "guild_id": gid_str,
@@ -205,7 +197,7 @@ def get_guild_config(guild_id: int):
         "close_time": row[6] or "22:00",
         "start_day": row[7] or "monday",
         "templates": tmpl,
-        "ping_role_id": ping_role
+        "ping_roles": p_roles
     }
 
 # Helper: Update Konfigurasi Dinamis Guild
@@ -223,7 +215,7 @@ def update_guild_config(guild_id: int, key: str, value):
            close_time = ?,
            start_day = ?,
            templates = ?,
-           ping_role_id = ?
+           ping_roles = ?
            WHERE guild_id = ?''',
         (
             str(cfg["absen_channel_id"]),
@@ -234,24 +226,27 @@ def update_guild_config(guild_id: int, key: str, value):
             cfg["close_time"],
             cfg["start_day"],
             json.dumps(cfg["templates"]),
-            str(cfg["ping_role_id"]),
+            json.dumps(cfg["ping_roles"]),
             str(guild_id)
         )
     )
     conn.commit()
 
+# Helper: Render Mentions Multi-Role
+def get_ping_roles_mentions(ping_roles: list[int]) -> str:
+    if not ping_roles:
+        return ""
+    return " ".join([f"<@&{r}>" for r in ping_roles])
+
 # Helper: Render Template Absensi dengan Header, Code Block, dan Footer
 def render_attendance_template(cfg: dict) -> str:
-    ping_role_id = cfg.get("ping_role_id") or 1500812071024197682
+    ping_roles = cfg.get("ping_roles", [])
+    ping_mentions = get_ping_roles_mentions(ping_roles)
     tmpl = cfg.get("templates", {})
 
-    # Periksa apakah ada template absen khusus
     custom_absen = tmpl.get("absen")
     if isinstance(custom_absen, dict):
         fields_str = custom_absen.get("teks", "")
-        custom_ping = custom_absen.get("role_ping_id")
-        if custom_ping:
-            ping_role_id = custom_ping
     elif isinstance(custom_absen, str):
         fields_str = custom_absen
     elif "absen_fields" in tmpl:
@@ -259,36 +254,34 @@ def render_attendance_template(cfg: dict) -> str:
     else:
         fields_str = (
             "Nama: \n"
-            "Pangkat: \n"
-            "Job: \n"
             "Divisi: \n"
             "Status: Hadir\n"
-            "Ping: <@&{ping_role_id}>"
+            f"Ping: {ping_mentions}"
         )
 
-    # Format ping_role_id jika ada placeholder
-    if "{ping_role_id}" in fields_str:
-        fields_str = fields_str.replace("{ping_role_id}", str(ping_role_id))
-    elif "Ping:" in fields_str and "<@&" not in fields_str:
-        fields_str = re.sub(r"Ping:.*", f"Ping: <@&{ping_role_id}>", fields_str)
+    # Ganti placeholder multi-role jika ada
+    if "{ping_roles_mentions}" in fields_str:
+        fields_str = fields_str.replace("{ping_roles_mentions}", ping_mentions)
+    elif "{ping_role_id}" in fields_str:
+        fields_str = fields_str.replace("{ping_role_id}", str(ping_roles[0]) if ping_roles else "")
 
-    # Bersihkan markdown backtick jika user menyertakannya di teks input
+    # Bersihkan markdown backtick
     clean_fields = fields_str.replace("```text", "").replace("```", "").strip()
 
-    # Hapus header dan footer duplikat jika teks input user menyertakannya
+    # Hapus header/footer duplikat jika teks input user menyertakannya
     clean_lines = []
     for line in clean_fields.splitlines():
         l_strip = line.strip()
-        if "TEMPLATE ABSENSI" in l_strip.upper():
+        if "TEMPLATE ABSENSI" in l_strip.upper() or "ATTENDANCE TEMPLATE" in l_strip.upper():
             continue
-        if "WAJIB MENYERTAKAN SCREENSHOT" in l_strip.upper():
+        if "WAJIB MENYERTAKAN SCREENSHOT" in l_strip.upper() or "BUKTI KEHADIRAN" in l_strip.upper():
             continue
         clean_lines.append(line)
     body_content = "\n".join(clean_lines).strip()
 
-    # Pastikan baris Ping ada di dalam form
-    if "ping:" not in body_content.lower():
-        body_content += f"\nPing: <@&{ping_role_id}>"
+    # Pastikan baris Ping ada di dalam form jika ada role terdaftar
+    if "ping:" not in body_content.lower() and ping_mentions:
+        body_content += f"\nPing: {ping_mentions}"
 
     # Susun 3 bagian konsisten: Header, Code Block, Footer
     rendered = (
@@ -296,22 +289,26 @@ def render_attendance_template(cfg: dict) -> str:
         "```text\n"
         f"{body_content}\n"
         "```\n"
-        "*(Wajib menyertakan screenshot/foto in-game)*"
+        "*(Wajib menyertakan screenshot/foto in-game/bukti kehadiran)*"
     )
     return rendered
 
 # Helper: Ambil Teks Template Dinamis Lainnya
 def get_rendered_template_text(cfg: dict, jenis: str, default_val: str) -> str:
     tmpl = cfg.get("templates", {}).get(jenis)
+    ping_mentions = get_ping_roles_mentions(cfg.get("ping_roles", []))
     if isinstance(tmpl, dict):
         teks = tmpl.get("teks", default_val)
-        role_ping = tmpl.get("role_ping_id")
-        if role_ping and f"<@&{role_ping}>" not in teks:
-            teks += f"\n\n<@&{role_ping}>"
-        return teks
     elif isinstance(tmpl, str):
-        return tmpl
-    return default_val
+        teks = tmpl
+    else:
+        teks = default_val
+
+    if ping_mentions and "{ping_roles_mentions}" in teks:
+        teks = teks.replace("{ping_roles_mentions}", ping_mentions)
+    elif ping_mentions and jenis in ["opening", "closing"] and "@&" not in teks:
+        teks += f"\n\n{ping_mentions}"
+    return teks
 
 # Helper Validasi Staf (Admin & Moderator)
 def check_is_staff(interaction: discord.Interaction) -> bool:
@@ -357,7 +354,7 @@ async def send_audit_log(guild: discord.Guild, title: str, description: str, col
     if fields:
         for name, val in fields.items():
             embed.add_field(name=name, value=val, inline=False)
-    embed.set_footer(text="Sistem Audit Absensi PASPAMPRES")
+    embed.set_footer(text="Sistem Audit Absensi Otomatis")
     try:
         await channel.send(embed=embed)
     except Exception:
@@ -401,6 +398,109 @@ async def execute_closing(channel: discord.TextChannel, cfg: dict):
         return False
 
 # ==========================================
+# ONBOARDING WIZARD UI
+# ==========================================
+class OnboardingView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="⚙️ Lihat Panduan Setup (/config)", style=discord.ButtonStyle.primary, custom_id="onboarding_guide")
+    async def guide_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Hanya Owner atau Administrator yang dapat berinteraksi
+        if not (interaction.user.guild_permissions.administrator or interaction.user.id == interaction.guild.owner_id):
+            await interaction.response.send_message("❌ Hanya Server Owner atau Administrator yang dapat mengakses konfigurasi ini.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="🛠️ Panduan Konfigurasi Awal Bot Absensi",
+            description=(
+                "Gunakan Slash Commands berikut untuk menyesuaikan sistem absensi server Anda:\n\n"
+                "1. **Tentukan Role Wajib Absen:**\n`/config role_absen role:@Role aksi:tambah`\n\n"
+                "2. **Tentukan Role Staf / Pengawas:**\n`/config role_staff role:@Role aksi:tambah`\n\n"
+                "3. **Tentukan Role yang Di-ping di Form Absen:**\n`/config ping_role role:@Role aksi:tambah`\n\n"
+                "4. **Atur Jam Buka / Tutup Otomatis (WIB):**\n`/config jadwal jam_buka:07:00 jam_tutup:22:00`\n\n"
+                "5. **Periksa Konfigurasi Saat Ini:**\n`/config show`"
+            ),
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="📋 Tampilkan Contoh Template", style=discord.ButtonStyle.secondary, custom_id="onboarding_preview")
+    async def preview_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not (interaction.user.guild_permissions.administrator or interaction.user.id == interaction.guild.owner_id):
+            await interaction.response.send_message("❌ Hanya Administrator yang dapat melihat pratinjau ini.", ephemeral=True)
+            return
+        cfg = get_guild_config(interaction.guild.id)
+        tmpl_preview = render_attendance_template(cfg)
+        await interaction.response.send_message(f"**Pratinjau Format Absensi Saat Ini:**\n\n{tmpl_preview}", ephemeral=True)
+
+# Helper Auto-Provisioning Channel saat bot masuk server baru
+async def provision_channels_for_guild(guild: discord.Guild):
+    # Cari channel yang sudah ada dengan kata kunci
+    keywords = ["absen", "attendance", "rekap", "report"]
+    found_absen = None
+    found_rekap = None
+
+    for ch in guild.text_channels:
+        name_lower = ch.name.lower()
+        if not found_absen and ("absen" in name_lower or "attendance" in name_lower) and "report" not in name_lower and "rekap" not in name_lower:
+            found_absen = ch
+        if not found_rekap and ("rekap" in name_lower or "report" in name_lower):
+            found_rekap = ch
+
+    # 1. Buat channel absensi jika belum ada
+    if not found_absen:
+        try:
+            found_absen = await guild.create_text_channel(
+                name="attendance",
+                topic="Saluran presensi kehadiran resmi anggota"
+            )
+        except Exception as e:
+            print(f"Gagal membuat channel attendance di {guild.name}: {e}")
+
+    # 2. Buat channel rekap dengan izin terkunci jika belum ada
+    if not found_rekap:
+        try:
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(send_messages=False, add_reactions=True, read_messages=True),
+                guild.me: discord.PermissionOverwrite(send_messages=True, embed_links=True, manage_messages=True)
+            }
+            found_rekap = await guild.create_text_channel(
+                name="attendance-report",
+                topic="Laporan rekapitulasi kehadiran dinas mingguan (Read Only)",
+                overwrites=overwrites
+            )
+        except Exception as e:
+            print(f"Gagal membuat channel attendance-report di {guild.name}: {e}")
+
+    # Simpan ke config database jika channel berhasil ditemukan/dibuat
+    cfg = get_guild_config(guild.id)
+    if found_absen:
+        update_guild_config(guild.id, "absen_channel_id", found_absen.id)
+    if found_rekap:
+        update_guild_config(guild.id, "rekap_channel_id", found_rekap.id)
+
+    # Kirim Onboarding Wizard ke channel absensi
+    if found_absen:
+        welcome_embed = discord.Embed(
+            title="👋 Selamat Datang di Bot Otomasi Absensi!",
+            description=(
+                f"Halo! Bot telah otomatis menyiapkan infrastruktur saluran presensi di server **{guild.name}**:\n\n"
+                f"• Saluran Absensi: {found_absen.mention}\n"
+                f"• Saluran Laporan Rekap: {found_rekap.mention if found_rekap else '`(Belum dibuat)`'}\n\n"
+                f"Nama channel di atas dapat diubah oleh Administrator kapan saja tanpa merusak sistem.\n"
+                f"Klik tombol di bawah untuk melihat langkah konfigurasi awal."
+            ),
+            color=discord.Color.blue(),
+            timestamp=datetime.now(pytz.UTC)
+        )
+        welcome_embed.set_footer(text="Hanya Server Owner / Administrator yang dapat mengonfigurasi")
+        try:
+            await found_absen.send(embed=welcome_embed, view=OnboardingView())
+        except Exception as e:
+            print(f"Gagal mengirim onboarding wizard di {guild.name}: {e}")
+
+# ==========================================
 # DISCORD SLASH COMMANDS (/...)
 # ==========================================
 
@@ -413,15 +513,15 @@ async def slash_buka_absen(interaction: discord.Interaction):
 
     cfg = get_guild_config(interaction.guild.id)
     channel = interaction.guild.get_channel(cfg["absen_channel_id"]) or interaction.channel
-    await interaction.response.send_message("⏳ Membuka sesi absensi dinas dan me-pin pengumuman...", ephemeral=True)
+    await interaction.response.send_message("⏳ Membuka sesi absensi dan me-pin pengumuman...", ephemeral=True)
     success = await execute_opening(channel, cfg)
     if success:
-        await interaction.followup.send("✅ Sesi absensi dinas berhasil dibuka dan di-pin!", ephemeral=True)
+        await interaction.followup.send("✅ Sesi absensi berhasil dibuka dan di-pin!", ephemeral=True)
     else:
         await interaction.followup.send("❌ Terjadi kendala saat membuka sesi absensi.", ephemeral=True)
 
 # 2. /tutup_absen
-@bot.tree.command(name="tutup_absen", description="Tutup sesi absensi dinas manual dan kirim pengumuman istirahat.")
+@bot.tree.command(name="tutup_absen", description="Tutup sesi absensi manual dan kirim pengumuman penutupan.")
 async def slash_tutup_absen(interaction: discord.Interaction):
     if not check_is_staff(interaction):
         await interaction.response.send_message("❌ Anda tidak memiliki izin untuk menggunakan perintah ini.", ephemeral=True)
@@ -429,10 +529,10 @@ async def slash_tutup_absen(interaction: discord.Interaction):
 
     cfg = get_guild_config(interaction.guild.id)
     channel = interaction.guild.get_channel(cfg["absen_channel_id"]) or interaction.channel
-    await interaction.response.send_message("⏳ Mengirim pengumuman penutupan absensi dinas...", ephemeral=True)
+    await interaction.response.send_message("⏳ Mengirim pengumuman penutupan absensi...", ephemeral=True)
     success = await execute_closing(channel, cfg)
     if success:
-        await interaction.followup.send("✅ Sesi absensi dinas telah ditutup.", ephemeral=True)
+        await interaction.followup.send("✅ Sesi absensi telah ditutup.", ephemeral=True)
     else:
         await interaction.followup.send("❌ Terjadi kendala saat menutup sesi absensi.", ephemeral=True)
 
@@ -513,11 +613,11 @@ async def slash_rekap(interaction: discord.Interaction):
 
     # Halaman 1: Ringkasan & Personel Disiplin
     embed1 = discord.Embed(
-        title="📊 REKAPITULASI DINAS MINGGUAN PASPAMPRES",
+        title="📊 REKAPITULASI KEHADIRAN MINGGUAN",
         description=(
             f"**Periode Siklus:** `{start_date}` s/d `{end_date}`\n"
-            f"**Total Personel Wajib Absen:** {len(target_members)} Orang\n"
-            f"**Standar Disiplin:** Minimal 3x Hadir\n"
+            f"**Total Anggota Wajib Absen:** {len(target_members)} Orang\n"
+            f"**Standar Kehadiran:** Minimal 3x Hadir\n"
             f"**Hari Awal Siklus:** {cfg['start_day'].capitalize()}"
         ),
         color=discord.Color.blue(),
@@ -525,57 +625,57 @@ async def slash_rekap(interaction: discord.Interaction):
     )
 
     disciplined_lines = [f"✅ **{m.mention}** (`{m.display_name}`): **{c}x** Hadir" for m, c in normal_list]
-    chunk_text = "\n".join(disciplined_lines[:25]) if disciplined_lines else "Belum ada personel yang mencapai 3x hadir."
-    embed1.add_field(name=f"🟢 Personel Memenuhi Standar (>= 3x) — [{len(normal_list)}]", value=chunk_text[:1024], inline=False)
+    chunk_text = "\n".join(disciplined_lines[:25]) if disciplined_lines else "Belum ada anggota yang mencapai 3x hadir."
+    embed1.add_field(name=f"🟢 Anggota Memenuhi Standar (>= 3x) — [{len(normal_list)}]", value=chunk_text[:1024], inline=False)
     if len(disciplined_lines) > 25:
-        embed1.add_field(name="🟢 Personel Memenuhi Standar (Lanjutan)", value="\n".join(disciplined_lines[25:50])[:1024], inline=False)
-    embed1.set_footer(text="Sistem Absensi PASPAMPRES • Halaman 1")
+        embed1.add_field(name="🟢 Anggota Memenuhi Standar (Lanjutan)", value="\n".join(disciplined_lines[25:50])[:1024], inline=False)
+    embed1.set_footer(text="Sistem Rekapitulasi Presensi • Halaman 1")
     pages.append(embed1)
 
     # Halaman 2: Personel Melanggar (<3x)
     embed2 = discord.Embed(
-        title="⚠️ DAFTAR PERSONEL KURANG DARI 3X HADIR",
-        description=f"Personel berikut memerlukan evaluasi kedisiplinan pada periode `{start_date}` s/d `{end_date}`.",
+        title="⚠️ DAFTAR ANGGOTA KURANG DARI 3X HADIR",
+        description=f"Anggota berikut belum memenuhi standar kehadiran pada periode `{start_date}` s/d `{end_date}`.",
         color=discord.Color.gold(),
         timestamp=datetime.now(pytz.UTC)
     )
     viol_lines = [f"⚠️ **{m.mention}** (`{m.display_name}`): Hanya **{c}x** Hadir" for m, c in violating_list]
-    viol_chunk = "\n".join(viol_lines[:25]) if viol_lines else "Semua personel memenuhi standar minimal!"
-    embed2.add_field(name=f"🟡 Personel Perlu Tindak Lanjut (< 3x) — [{len(violating_list)}]", value=viol_chunk[:1024], inline=False)
+    viol_chunk = "\n".join(viol_lines[:25]) if viol_lines else "Seluruh anggota memenuhi standar minimal!"
+    embed2.add_field(name=f"🟡 Anggota Perlu Tindak Lanjut (< 3x) — [{len(violating_list)}]", value=viol_chunk[:1024], inline=False)
     if len(viol_lines) > 25:
-        embed2.add_field(name="🟡 Personel Perlu Tindak Lanjut (Lanjutan)", value="\n".join(viol_lines[25:50])[:1024], inline=False)
-    embed2.set_footer(text="Sistem Absensi PASPAMPRES • Halaman 2")
+        embed2.add_field(name="🟡 Anggota Perlu Tindak Lanjut (Lanjutan)", value="\n".join(viol_lines[25:50])[:1024], inline=False)
+    embed2.set_footer(text="Sistem Rekapitulasi Presensi • Halaman 2")
     pages.append(embed2)
 
     view = RecapPaginationView(pages)
     await interaction.followup.send(embed=pages[0], view=view)
 
 # 4. /tegur
-@bot.tree.command(name="tegur", description="Kirim Embed Surat Teguran Kedisiplinan Resmi kepada personel.")
-@app_commands.describe(member="Personel yang ditegur", pesan="Catatan pelanggaran kedisiplinan")
+@bot.tree.command(name="tegur", description="Kirim Embed Surat Teguran Kedisiplinan Resmi kepada anggota.")
+@app_commands.describe(member="Anggota yang ditegur", pesan="Catatan pelanggaran kedisiplinan")
 async def slash_tegur(interaction: discord.Interaction, member: discord.Member, pesan: str):
     if not check_is_staff(interaction):
-        await interaction.response.send_message("❌ Anda tidak memiliki izin untuk menegur personel.", ephemeral=True)
+        await interaction.response.send_message("❌ Anda tidak memiliki izin untuk menegur anggota.", ephemeral=True)
         return
 
     cfg = get_guild_config(interaction.guild.id)
-    mod_tag_str = " ".join([f"<@&{r}>" for r in cfg["staff_roles"]])
+    ping_mentions = get_ping_roles_mentions(cfg.get("ping_roles", []))
 
     embed = discord.Embed(
         title="⚠️ SURAT TEGURAN KEDISIPLINAN RESMI",
         description=(
-            f"**Personel Dituju:** {member.mention} (`{member.display_name}`)\n"
-            f"**Pejabat Pengawas:** {interaction.user.mention}\n\n"
+            f"**Anggota Dituju:** {member.mention} (`{member.display_name}`)\n"
+            f"**Staf Pengawas:** {interaction.user.mention}\n\n"
             f"**Catatan Pelanggaran:**\n```{pesan}```\n"
             f"⚠️ *Peringatan resmi ini dicatat ke dalam database kedisiplinan. "
-            f"Harap segera memperbaiki kepatuhan dinas!*"
+            f"Harap segera meningkatkan kepatuhan presensi!*"
         ),
         color=discord.Color.gold(),
         timestamp=datetime.now(pytz.UTC)
     )
-    embed.set_footer(text="Komando Disiplin PASPAMPRES")
+    embed.set_footer(text="Komando Pengawasan & Disiplin")
 
-    await interaction.response.send_message(content=f"{member.mention} {mod_tag_str}", embed=embed)
+    await interaction.response.send_message(content=f"{member.mention} {ping_mentions}".strip(), embed=embed)
     await send_audit_log(
         interaction.guild,
         "⚠️ Teguran Kedisiplinan Dikeluarkan",
@@ -598,13 +698,13 @@ async def slash_reject(interaction: discord.Interaction, member: discord.Member,
     cursor.execute("DELETE FROM attendance WHERE user_id = ? AND date = ?", (str(member.id), today_str))
     conn.commit()
 
-    mod_tag_str = " ".join([f"<@&{r}>" for r in cfg["staff_roles"]])
+    ping_mentions = get_ping_roles_mentions(cfg.get("ping_roles", []))
     absen_ch = interaction.guild.get_channel(cfg["absen_channel_id"]) or interaction.channel
 
     await interaction.response.send_message(f"✅ Absensi {member.mention} untuk tanggal `{today_str}` berhasil dibatalkan.", ephemeral=True)
     await absen_ch.send(
         f"⚠️ Absen milik {member.mention} dibatalkan oleh Pengawas ({interaction.user.mention}) "
-        f"karena: **{alasan}**. Silakan kirim ulang absensi yang benar.\n{mod_tag_str}"
+        f"karena: **{alasan}**. Silakan kirim ulang absensi yang benar.\n{ping_mentions}".strip()
     )
 
     await send_audit_log(
@@ -619,17 +719,17 @@ async def slash_reject(interaction: discord.Interaction, member: discord.Member,
 @bot.tree.command(name="help", description="Panduan lengkap seluruh fitur dan Slash Commands bot.")
 async def slash_help(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="📖 PANDUAN LENGKAP BOT ABSENSI PASPAMPRES",
+        title="📖 PANDUAN LENGKAP SISTEM ABSENSI OTOMATIS",
         description="Berikut adalah daftar perintah Slash Commands (`/`) yang tersedia:",
         color=discord.Color.blue()
     )
     embed.add_field(
-        name="🛠️ Perintah Operasional Dinas",
+        name="🛠️ Perintah Operasional",
         value=(
             "`/buka_absen` — Membuka sesi absen harian manual, auto-pin, dan kirim template.\n"
-            "`/tutup_absen` — Menutup sesi absen manual dan mengirim pesan istirahat.\n"
+            "`/tutup_absen` — Menutup sesi absen manual dan mengirim pesan penutupan.\n"
             "`/rekap` — Menampilkan rekapitulasi kehadiran mingguan berhalaman (Embed pagination).\n"
-            "`/tegur` — Mengirim surat teguran resmi kepada personel yang melanggar.\n"
+            "`/tegur` — Mengirim surat teguran resmi kepada anggota yang melanggar.\n"
             "`/reject` — Membatalkan kehadiran member hari ini seketika."
         ),
         inline=False
@@ -638,17 +738,18 @@ async def slash_help(interaction: discord.Interaction):
         name="⚙️ Perintah Konfigurasi Server (`/config`)",
         value=(
             "`/config show` — Tampilkan seluruh pengaturan dinamis server aktif.\n"
-            "`/config ping_role` — Atur role yang otomatis di-ping pada baris `Ping:` di template absensi.\n"
+            "`/config ping_role` — Tambah atau hapus role target mention baris ping template.\n"
             "`/config role_absen` — Tambah atau hapus role wajib absen.\n"
             "`/config role_staff` — Tambah atau hapus role staf pengawas (Admin/Mod).\n"
             "`/config jadwal` — Atur jam buka dan tutup absensi otomatis (WIB).\n"
             "`/config hari_awal` — Atur hari permulaan siklus 7 hari rekap mingguan.\n"
-            "`/config channel` — Atur saluran absensi dinas atau saluran rekap.\n"
-            "`/config template` — Kustomisasi template teks dinamis bot."
+            "`/config channel` — Atur saluran absensi atau saluran rekap.\n"
+            "`/config template` — Kustomisasi template teks dinamis bot.\n"
+            "`/config reset` — Kembalikan pengaturan ke setelan awal default."
         ),
         inline=False
     )
-    embed.set_footer(text="Sistem Otomasi Kedisiplinan PASPAMPRES")
+    embed.set_footer(text="Sistem Otomasi Kehadiran & Kedisiplinan")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ==========================================
@@ -668,7 +769,7 @@ async def config_show(interaction: discord.Interaction):
 
     wajib_roles_str = ", ".join([f"<@&{r}>" for r in cfg["wajib_absen_roles"]]) or "Belum diatur"
     staff_roles_str = ", ".join([f"<@&{r}>" for r in cfg["staff_roles"]]) or "Belum diatur"
-    ping_role_str = f"<@&{cfg['ping_role_id']}>" if cfg.get("ping_role_id") else "Default"
+    ping_roles_str = ", ".join([f"<@&{r}>" for r in cfg.get("ping_roles", [])]) or "Belum diatur"
 
     embed = discord.Embed(
         title=f"⚙️ Konfigurasi Server: {interaction.guild.name}",
@@ -677,7 +778,7 @@ async def config_show(interaction: discord.Interaction):
     )
     embed.add_field(name="Saluran Absensi", value=absen_ch.mention if absen_ch else f"ID: {cfg['absen_channel_id']}", inline=True)
     embed.add_field(name="Saluran Rekap", value=rekap_ch.mention if rekap_ch else f"ID: {cfg['rekap_channel_id']}", inline=True)
-    embed.add_field(name="Role Target Ping", value=ping_role_str, inline=True)
+    embed.add_field(name="Role Target Ping", value=ping_roles_str, inline=True)
     embed.add_field(name="Hari Awal Siklus", value=cfg["start_day"].capitalize(), inline=True)
     embed.add_field(name="Jadwal Otomatis (WIB)", value=f"Buka: `{cfg['open_time']}` | Tutup: `{cfg['close_time']}`", inline=True)
     embed.add_field(name="Role Wajib Absen", value=wajib_roles_str, inline=False)
@@ -686,15 +787,29 @@ async def config_show(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@config_group.command(name="ping_role", description="Atur role yang otomatis di-mention pada baris Ping di template absensi.")
-@app_commands.describe(role="Role target yang akan di-mention pada template absen")
-async def config_ping_role(interaction: discord.Interaction, role: discord.Role):
+@config_group.command(name="ping_role", description="Tambah atau hapus role target yang di-mention pada baris Ping template absen.")
+@app_commands.describe(role="Role target yang akan di-mention", aksi="Pilih tambah atau hapus")
+async def config_ping_role(interaction: discord.Interaction, role: discord.Role, aksi: Literal["tambah", "hapus"]):
     if not check_is_staff(interaction):
         await interaction.response.send_message("❌ Anda tidak memiliki izin.", ephemeral=True)
         return
 
-    update_guild_config(interaction.guild.id, "ping_role_id", role.id)
-    await interaction.response.send_message(f"✅ Target baris `Ping:` pada template absensi berhasil diatur ke: {role.mention}.", ephemeral=True)
+    cfg = get_guild_config(interaction.guild.id)
+    ping_roles = cfg.get("ping_roles", [])
+    if aksi == "tambah":
+        if role.id not in ping_roles:
+            ping_roles.append(role.id)
+            update_guild_config(interaction.guild.id, "ping_roles", ping_roles)
+            await interaction.response.send_message(f"✅ Role {role.mention} berhasil ditambahkan ke daftar target ping template.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"ℹ️ Role {role.mention} sudah ada di daftar target ping.", ephemeral=True)
+    else:
+        if role.id in ping_roles:
+            ping_roles.remove(role.id)
+            update_guild_config(interaction.guild.id, "ping_roles", ping_roles)
+            await interaction.response.send_message(f"🗑️ Role {role.mention} berhasil dihapus dari daftar target ping.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"ℹ️ Role {role.mention} tidak ditemukan di daftar target ping.", ephemeral=True)
 
 @config_group.command(name="role_absen", description="Tambah atau hapus role wajib absen.")
 @app_commands.describe(role="Role yang ingin dikonfigurasi", aksi="Pilih tambah atau hapus")
@@ -787,14 +902,12 @@ async def config_channel(interaction: discord.Interaction, tipe: Literal["absens
 @config_group.command(name="template", description="Kustomisasi template teks pesan bot.")
 @app_commands.describe(
     jenis="Pilih template yang ingin diubah",
-    teks="Teks template baru",
-    role_ping="Role target opsional yang otomatis di-ping pada template ini"
+    teks="Teks template baru"
 )
 async def config_template(
     interaction: discord.Interaction,
     jenis: Literal["opening", "closing", "absen", "teguran", "peringatan"],
-    teks: str,
-    role_ping: discord.Role = None
+    teks: str
 ):
     if not check_is_staff(interaction):
         await interaction.response.send_message("❌ Anda tidak memiliki izin.", ephemeral=True)
@@ -803,27 +916,15 @@ async def config_template(
     cfg = get_guild_config(interaction.guild.id)
     templates = cfg["templates"]
 
-    role_ping_id = role_ping.id if role_ping else None
-
-    # Simpan dalam format terstruktur JSON
-    templates[jenis] = {
-        "teks": teks,
-        "role_ping_id": role_ping_id
-    }
-
-    # Jika yang diubah adalah template absen dan role_ping disertakan, sinkronkan ping_role_id
-    if jenis == "absen" and role_ping_id:
-        update_guild_config(interaction.guild.id, "ping_role_id", role_ping_id)
-
+    templates[jenis] = teks
     update_guild_config(interaction.guild.id, "templates", templates)
 
-    ping_info = f" dengan target ping {role_ping.mention}" if role_ping else ""
     await interaction.response.send_message(
-        f"✅ Template teks **{jenis}** berhasil diperbarui{ping_info}!",
+        f"✅ Template teks **{jenis}** berhasil diperbarui!",
         ephemeral=True
     )
 
-@config_group.command(name="reset", description="Kembalikan seluruh pengaturan server ke setelan awal (default).")
+@config_group.command(name="reset", description="Kembalikan seluruh pengaturan server ke setelan awal (default agnostik).")
 async def config_reset(interaction: discord.Interaction):
     if not check_is_staff(interaction):
         await interaction.response.send_message("❌ Anda tidak memiliki izin untuk mereset pengaturan.", ephemeral=True)
@@ -833,7 +934,6 @@ async def config_reset(interaction: discord.Interaction):
     cursor.execute("DELETE FROM guild_config WHERE guild_id = ?", (gid_str,))
     conn.commit()
 
-    # Reset cache in-memory jika ada
     last_pinned_messages.pop(interaction.guild.id, None)
 
     # Re-inisialisasi konfigurasi default
@@ -843,10 +943,10 @@ async def config_reset(interaction: discord.Interaction):
         title="🔄 Reset Konfigurasi Berhasil",
         description=(
             f"Seluruh pengaturan kustom untuk server **{interaction.guild.name}** "
-            f"telah dihapus dari database dan dikembalikan ke **setelan default PASPAMPRES**.\n\n"
+            f"telah dihapus dan dikembalikan ke **setelan default universal**.\n\n"
             f"• **Jadwal Dinas:** `07:00` - `22:00` WIB\n"
             f"• **Hari Awal Rekap:** Senin\n"
-            f"• **Template:** Format resmi PASPAMPRES"
+            f"• **Template:** Format standar universal"
         ),
         color=discord.Color.green(),
         timestamp=datetime.now(pytz.UTC)
@@ -865,7 +965,6 @@ last_executed_close_minute = {}
 async def check_dynamic_schedules():
     now_wib = datetime.now(WIB)
     current_time_str = now_wib.strftime("%H:%M")
-    current_day_str = now_wib.strftime("%Y-%m-%d")
 
     for guild in bot.guilds:
         try:
@@ -893,19 +992,27 @@ async def check_dynamic_schedules():
             print(f"Error pada loop jadwal guild {guild.id}: {e}")
 
 # ==========================================
-# EVENTS (on_ready, on_message, on_raw_reaction_add)
+# EVENTS (on_ready, on_guild_join, on_message, on_raw_reaction_add)
 # ==========================================
 @bot.event
 async def on_ready():
-    print(f"Bot {bot.user} siap mengamankan absensi dinas PASPAMPRES!")
+    print(f"Bot {bot.user} siap mengamankan absensi presensi!")
     try:
         synced = await bot.tree.sync()
         print(f"Berhasil mensinkronkan {len(synced)} Discord Slash Commands!")
     except Exception as e:
         print(f"Gagal mensinkronkan Slash Commands: {e}")
 
+    # Daftarkan OnboardingView persistent
+    bot.add_view(OnboardingView())
+
     if not check_dynamic_schedules.is_running():
         check_dynamic_schedules.start()
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    print(f"Bot baru saja bergabung ke server: {guild.name} ({guild.id})")
+    await provision_channels_for_guild(guild)
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -920,14 +1027,13 @@ async def on_message(message: discord.Message):
 
         if is_wajib:
             content = message.content
-            # Normalisasi konten untuk pengecekan kata kunci (hilangkan backticks jika member mengetik di dalam/luar codeblock)
             normalized_content = content.replace("`", "")
 
             # Validasi 1: Wajib Melampirkan Foto / Screenshot
             if not message.attachments:
                 await message.delete()
                 await message.channel.send(
-                    f"❌ {message.author.mention} Absen ditolak! Wajib menyertakan screenshot/foto in-game sesuai PRD.",
+                    f"❌ {message.author.mention} Absen ditolak! Wajib menyertakan screenshot/foto in-game/bukti kehadiran.",
                     delete_after=15
                 )
                 await send_audit_log(
@@ -938,9 +1044,8 @@ async def on_message(message: discord.Message):
                 )
                 return
 
-            # Validasi 2: Template Teks Absensi Wajib
-            # Memeriksa kata kunci form inti secara fleksibel terhadap format code block
-            required_keywords = ["nama:", "pangkat:", "job:", "divisi:", "status:"]
+            # Validasi 2: Template Teks Absensi Wajib (Kata kunci inti: Nama & Status)
+            required_keywords = ["nama:", "status:"]
             missing_keywords = [kw for kw in required_keywords if kw not in normalized_content.lower()]
 
             if missing_keywords:
@@ -972,7 +1077,7 @@ async def on_message(message: discord.Message):
                 fields={"Member": f"{message.author.name} ({message.author.id})", "Tanggal": today_str}
             )
 
-            # Kirim Template Absen Baru yang Rapi di Bawahnya (Header, Code Block, Footer)
+            # Kirim Template Absen Baru di Bawahnya
             new_template_hint = render_attendance_template(cfg)
             await message.channel.send(new_template_hint)
 
@@ -1027,10 +1132,10 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         pass
 
     # Berikan Notifikasi di Channel
-    mod_tag_str = " ".join([f"<@&{r}>" for r in cfg["staff_roles"]])
+    ping_mentions = get_ping_roles_mentions(cfg.get("ping_roles", []))
     await channel.send(
         f"⚠️ Absen milik {target_user.mention} dibatalkan oleh Pengawas ({member.mention}) "
-        f"karena foto/ketentuan tidak sesuai. Silakan kirim ulang absensi yang benar.\n{mod_tag_str}",
+        f"karena foto/ketentuan tidak sesuai. Silakan kirim ulang absensi yang benar.\n{ping_mentions}".strip(),
         delete_after=20
     )
 

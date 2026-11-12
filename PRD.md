@@ -1,44 +1,47 @@
-# PRD: Discord Attendance & Automation Bot (SV DC)
+# PRD: Discord Attendance & Automation Bot (Universal & Agnostic Engine)
 
 ## 1. Tujuan Proyek
-Membuat bot Discord otomatis multi-server berbasis Discord Slash Commands (`/`) dan database konfigurasi dinamis (`attendance.db`) untuk mengelola absensi member wajib absen dengan validasi ketat, auto lock/unlock channel, auto-pin pengumuman dinas, layout template standar, konfigurasi ping role dinamis & terintegrasi, fitur reset konfigurasi, penolakan otomatis/manual, sistem audit log, serta rekapitulasi mingguan berhalaman (Embed pagination) dan peringatan pelanggaran beruntun.
+Membuat bot Discord multi-server agnostik, otomatis, dan mandiri berbasis Discord Slash Commands (`/`) serta database konfigurasi dinamis (`attendance.db`). Bot ini mengelola absensi member wajib absen dengan validasi lampiran foto, auto lock/unlock channel, auto-pin pengumuman dinas, layout template standar, konfigurasi multi-role ping dinamis, fitur auto-provisioning channel baru dengan security lock, interactive onboarding wizard, dan rekapitulasi mingguan berhalaman.
 
 ## 2. Fitur & Arsitektur Utama
 
-### 2.1 Database Konfigurasi Dinamis (`guild_config`)
-Setiap server (guild) memiliki pengaturan tersendiri yang tersimpan di SQLite:
-- `guild_id` (TEXT PRIMARY KEY)
-- `absen_channel_id` (TEXT)
-- `rekap_channel_id` (TEXT)
-- `wajib_absen_roles` (TEXT - JSON list ID role wajib absen)
-- `staff_roles` (TEXT - JSON list ID role Admin & Moderator)
-- `ping_role_id` (TEXT - ID role yang otomatis di-ping pada baris `Ping:` di template absensi)
-- `open_time` (TEXT - format 'HH:MM', default '07:00')
-- `close_time` (TEXT - format 'HH:MM', default '22:00')
-- `start_day` (TEXT - default 'monday', opsi: senin s/d minggu)
-- `templates` (TEXT - JSON object menyimpan template dinamis: opening, closing, absen, teguran, peringatan)
+### 2.1 Default Templates Agnostik (Universal)
+Semua template bawaan tidak lagi terikat pada instansi atau nama kesatuan tertentu:
+- **Opening:** Pemberitahuan pembukaan jam dinas/kehadiran harian standar.
+- **Closing:** Pemberitahuan penutupan jam dinas harian standar.
+- **Absen:**
+  ```text
+  📋 **TEMPLATE ABSENSI:**
+  ```text
+  Nama: 
+  Divisi: 
+  Status: Hadir
+  Ping: <@&ROLE_ID_1> <@&ROLE_ID_2>
+  ```
+  *(Wajib menyertakan screenshot/foto in-game/bukti kehadiran)*
+  ```
+- **Teguran:** Surat teguran kedisiplinan resmi agnostik.
+- **Peringatan:** Peringatan evaluasi kehadiran agnostik.
 
-### 2.2 Struktur Layout Template Absensi Standar
-Template absensi yang dikirim oleh bot memiliki tata letak 3 bagian yang konsisten:
-1. **Header:** `📋 TEMPLATE ABSENSI:` (di luar code block).
-2. **Kotak Code Block (`` ```text ``):**
-   ```text
-   Nama: 
-   Pangkat: 
-   Job: 
-   Divisi: 
-   Status: Hadir
-   Ping: <@&ROLE_ID>
-   ```
-3. **Footer:** `*(Wajib menyertakan screenshot/foto in-game)*` di bagian paling bawah.
+### 2.2 Dukungan Multi-Role Ping
+- Bot mendukung penyimpanan dan pelampiran lebih dari satu role pada baris `Ping:` maupun pengumuman dinas.
+- Disimpan dalam bentuk JSON List ID role (`ping_roles`).
 
-### 2.3 Command Group Pengaturan Server (`/config`)
-- `/config show`: Menampilkan ringkasan konfigurasi server aktif dalam bentuk Embed (`ephemeral=True`).
-- `/config template` (`jenis: opening/closing/absen/teguran/peringatan`, `teks`, `role_ping` [opsional]): Kustomisasi teks template dan role yang di-mention secara terstruktur.
-- `/config reset`: Mengembalikan pengaturan server ke setelan awal (*default* PASPAMPRES) dengan menghapus data kustom di database (`ephemeral=True`).
-- `/config ping_role` (`role: discord.Role`): Mengatur role yang otomatis di-mention pada baris `Ping:` di template absensi.
-- `/config role_absen` (`role`, `aksi: tambah/hapus`): Atur role wajib absen.
-- `/config role_staff` (`role`, `aksi: tambah/hapus`): Atur role staf pengawas (Admin/Moderator).
+### 2.3 Auto-Provisioning & Channel Security (`on_guild_join`)
+Saat bot bergabung ke server baru:
+1. Memeriksa keberadaan channel teks yang mengandung kata kunci: `absen`, `attendance`, `rekap`, `report`.
+2. Jika tidak ada, bot otomatis membuat dua channel:
+   - `attendance`: Saluran pengiriman absensi member.
+   - `attendance-report`: Saluran rekapitulasi dinas dengan izin terkunci (`send_messages: False`, `add_reactions: True` bagi role default `@everyone`, hanya Staf/Admin yang bisa mengetik).
+3. Mengirimkan **Interactive Onboarding Wizard** ke channel absensi yang baru dibuat khusus untuk Server Owner / Administrator.
+
+### 2.4 Command Group Pengaturan Server (`/config`)
+- `/config show`: Tampilkan seluruh konfigurasi server saat ini (`ephemeral=True`).
+- `/config ping_role` (`role`, `aksi: tambah/hapus`): Tambah atau hapus role target mention baris ping template absen.
+- `/config role_absen` (`role`, `aksi: tambah/hapus`): Tambah atau hapus role wajib absen.
+- `/config role_staff` (`role`, `aksi: tambah/hapus`): Tambah atau hapus role staf pengawas (Admin/Mod).
 - `/config jadwal` (`jam_buka`, `jam_tutup`): Atur jam buka dan tutup absensi dinas (WIB).
-- `/config hari_awal` (`hari`): Atur hari permulaan siklus 7 hari rekapitulasi mingguan.
-- `/config channel` (`tipe: absensi/rekap`, `channel`): Atur saluran absensi atau rekap.
+- `/config hari_awal` (`hari`): Atur hari permulaan siklus 7 hari rekap mingguan.
+- `/config channel` (`tipe: absensi/rekap`, `channel`): Arahkan saluran absensi atau rekap.
+- `/config template` (`jenis`, `teks`): Kustomisasi template teks dinamis.
+- `/config reset`: Kembalikan seluruh pengaturan server ke setelan awal default agnostik.
