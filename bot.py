@@ -193,47 +193,50 @@ async def run_weekly_recap(guild, target_channel=None, is_manual=False):
         print(f"Role wajib absen ({cfg['role_wajib_absen_id']}) tidak ditemukan!")
         return
 
-    members = wajib_role.members
+    # Ambil batas tanggal minggu berjalan (Senin s/d Minggu)
     monday_str, sunday_str, current_week_key = get_current_week_bounds()
 
-    # Hitung previous week key
+    # Hitung week key minggu lalu untuk tracking pelanggaran beruntun
     prev_ref = datetime.now(WIB) - timedelta(days=7)
     _, _, prev_week_key = get_current_week_bounds(prev_ref)
 
-    recap_lines = []
+    # Query seluruh data absensi dalam rentang minggu ini (menggunakan query batch yang akurat)
+    cursor.execute(
+        "SELECT user_id, COUNT(DISTINCT date) as cnt FROM attendance WHERE date >= ? AND date <= ? GROUP BY user_id",
+        (monday_str, sunday_str)
+    )
+    attendance_map = dict(cursor.fetchall())
+
     normal_members = []
     violating_members = []
     consecutive_violators = []
 
-    for m in members:
-        if m.bot:
-            continue
-        cursor.execute(
-            "SELECT COUNT(DISTINCT date) FROM attendance WHERE user_id = ? AND date >= ? AND date <= ?",
-            (str(m.id), monday_str, sunday_str)
-        )
-        count = cursor.fetchone()[0]
+    # Filter seluruh member yang memiliki role wajib absen (kecuali bot)
+    target_members = [m for m in wajib_role.members if not m.bot]
+
+    for m in target_members:
+        user_id_str = str(m.id)
+        count = attendance_map.get(user_id_str, 0)
         is_violation = 1 if count < 3 else 0
 
-        # Cek pelanggaran beruntun dari minggu sebelumnya
+        # Cek status pelanggaran minggu lalu dari tabel weekly_recap
         cursor.execute(
             "SELECT consecutive_violations FROM weekly_recap WHERE user_id = ? AND week_key = ?",
-            (str(m.id), prev_week_key)
+            (user_id_str, prev_week_key)
         )
         prev_row = cursor.fetchone()
         prev_consec = prev_row[0] if prev_row else 0
 
         consecutive = (prev_consec + 1) if is_violation else 0
 
-        # Simpan ke tabel weekly_recap
+        # Catat snapshot rekap minggu ini
         cursor.execute(
             '''INSERT OR REPLACE INTO weekly_recap 
                (user_id, week_key, attendance_count, is_violation, consecutive_violations)
                VALUES (?, ?, ?, ?, ?)''',
-            (str(m.id), current_week_key, count, is_violation, consecutive)
+            (user_id_str, current_week_key, count, is_violation, consecutive)
         )
 
-        display_name = m.nick or m.name
         if is_violation:
             if consecutive >= 2:
                 consecutive_violators.append((m, count, consecutive))
@@ -244,46 +247,94 @@ async def run_weekly_recap(guild, target_channel=None, is_manual=False):
 
     conn.commit()
 
-    # Susun Embed Rekapitulasi
+    # Urutkan berdasarkan kehadiran terbanyak
+    normal_members.sort(key=lambda x: x[1], reverse=True)
+    violating_members.sort(key=lambda x: x[1])
+
+    # Header Embed
     embed = discord.Embed(
-        title=f"📊 REKAPITULASI ABSENSI MINGGUAN ({monday_str} s/d {sunday_str})",
+        title="📊 REKAPITULASI DINAS MINGGUAN PASPAMPRES",
         description=(
-            f"**Total Personel Wajib Absen:** {len(members)} orang\n"
-            f"**Standar Minimal:** 3x Absen per Minggu\n"
-            f"**Status Rekap:** {'On-Demand (Manual)' if is_manual else 'Otomatis Minggu Malam'}"
+            f"**Periode Dinas:** `{monday_str}` s/d `{sunday_str}`\n"
+            f"**Total Personel Wajib Absen:** {len(target_members)} Personel\n"
+            f"**Standar Kedisiplinan:** Minimal 3x Hadir / Minggu\n"
+            f"**Status Rekapitulasi:** {'On-Demand (Manual Staff)' if is_manual else 'Otomatis Penutupan Minggu'}"
         ),
         color=discord.Color.blue(),
         timestamp=datetime.now(pytz.UTC)
     )
 
-    # 1. Personel Disiplin (>= 3x)
-    if normal_members:
-        disciplined_text = "\n".join([f"✅ **{m.mention}** (`{m.name}`): **{c}x** Hadir" for m, c in normal_members])
-        embed.add_field(name="🟢 Personel Memenuhi Standar (>= 3x)", value=disciplined_text[:1024], inline=False)
-    else:
-        embed.add_field(name="🟢 Personel Memenuhi Standar (>= 3x)", value="Belum ada data kehadiran.", inline=False)
+    # Helper untuk chunking teks agar tidak melebihi limit 1024 karakter per field Discord Embed
+    def add_chunked_field(target_embed, field_title, lines, empty_text="Tidak ada personel."):
+        if not lines:
+            target_embed.add_field(name=field_title, value=empty_text, inline=False)
+            return
 
-    # 2. Personel Melanggar (< 3x)
-    if violating_members:
-        violation_text = "\n".join([f"⚠️ **{m.mention}** (`{m.name}`): Hanya **{c}x** Hadir (Kurang dari 3x)" for m, c in violating_members])
-        embed.add_field(name="🟡 Personel Kurang dari 3x Hadir (Teguran Pertama)", value=violation_text[:1024], inline=False)
+        current_chunk = []
+        current_len = 0
+        part = 1
+        for line in lines:
+            if current_len + len(line) + 1 > 1000:
+                name = f"{field_title} (Bagian {part})" if part > 1 or len(lines) > len(current_chunk) else field_title
+                target_embed.add_field(name=name, value="\n".join(current_chunk), inline=False)
+                current_chunk = [line]
+                current_len = len(line)
+                part += 1
+            else:
+                current_chunk.append(line)
+                current_len += len(line) + 1
 
-    # 3. Personel Pelanggaran Beruntun (>= 2 Minggu)
+        if current_chunk:
+            name = f"{field_title} (Bagian {part})" if part > 1 else field_title
+            target_embed.add_field(name=name, value="\n".join(current_chunk), inline=False)
+
+    # 1. Field Personel Memenuhi Standar (>= 3x Hadir)
+    disciplined_lines = [
+        f"✅ **{m.mention}** (`{m.display_name}`): **{c}x** Hadir"
+        for m, c in normal_members
+    ]
+    add_chunked_field(
+        embed,
+        f"🟢 Personel Memenuhi Standar (>= 3x) — [{len(normal_members)} Personel]",
+        disciplined_lines,
+        empty_text="Belum ada personel yang mencapai 3x kehadiran."
+    )
+
+    # 2. Field Personel Kurang dari 3x Hadir (Teguran / Perlu Tindak Lanjut)
+    violating_lines = [
+        f"⚠️ **{m.mention}** (`{m.display_name}`): **{c}x** Hadir (Kurang dari 3x)"
+        for m, c in violating_members
+    ]
+    add_chunked_field(
+        embed,
+        f"🟡 Personel Kurang dari 3x Hadir (Teguran) — [{len(violating_members)} Personel]",
+        violating_lines,
+        empty_text="Seluruh personel memenuhi standar minimal!"
+    )
+
+    # 3. Field Pelanggaran 2+ Minggu Berturut-turut (Jika Ada)
     if consecutive_violators:
-        consec_text = "\n".join([f"🚨 **{m.mention}** (`{m.name}`): **{c}x** Hadir (Melanggar **{consec} minggu berturut-turut**)" for m, c, consec in consecutive_violators])
-        embed.add_field(name="🔴 PERINGATAN DARURAT: Pelanggaran 2+ Minggu Berturut-turut", value=consec_text[:1024], inline=False)
+        consec_lines = [
+            f"🚨 **{m.mention}** (`{m.display_name}`): **{c}x** Hadir (Melanggar **{consec} minggu berturut-turut**)"
+            for m, c, consec in consecutive_violators
+        ]
+        add_chunked_field(
+            embed,
+            f"🔴 PERINGATAN DARURAT: Pelanggaran 2+ Minggu — [{len(consecutive_violators)} Personel]",
+            consec_lines
+        )
 
-    embed.set_footer(text="Sistem Rekapitulasi Kehadiran Dinas PASPAMPRES")
+    embed.set_footer(text="Sistem Otomasi Kedisiplinan PASPAMPRES • Format Embed Aman")
     await channel.send(embed=embed)
 
-    # Notifikasi Peringatan & Tag Staff
+    # Notifikasi Peringatan & Tag Jajaran Pengawas
     mod_tag_str = " ".join([f"<@&{r}>" for r in cfg["role_moderator_ids"]])
     if consecutive_violators:
         consec_mentions = " ".join([m.mention for m, _, _ in consecutive_violators])
         await channel.send(
             f"🚨 **PERINGATAN TINGKAT TINGGI KEDISIPLINAN!** 🚨\n"
-            f"Personel berikut tercatat melanggar standar kehadiran **2 MINGGU BERTURUT-TURUT**: {consec_mentions}\n"
-            f"Mohon jajaran Admin & Pengawas {mod_tag_str} segera mengambil tindakan penalti/sanksi kedisiplinan tegas!"
+            f"Personel berikut melanggar standar kehadiran **2 MINGGU BERTURUT-TURUT**: {consec_mentions}\n"
+            f"Mohon jajaran Admin & Pengawas {mod_tag_str} segera mengambil tindakan penalti kedisiplinan tegas!"
         )
     elif violating_members:
         viol_mentions = " ".join([m.mention for m, _ in violating_members])
