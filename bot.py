@@ -5,6 +5,15 @@ from datetime import datetime
 import pytz
 import os
 
+# Auto-load .env jika file ada
+if os.path.exists(".env"):
+    with open(".env", "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
