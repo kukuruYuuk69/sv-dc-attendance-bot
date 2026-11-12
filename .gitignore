@@ -1,0 +1,14 @@
+# Environment and secrets
+.env
+
+# Database
+*.db
+*.sqlite3
+
+# Python cache & virtual environment
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
