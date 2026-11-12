@@ -321,14 +321,21 @@ async def on_raw_reaction_add(payload):
     cursor.execute("DELETE FROM attendance WHERE user_id = ? AND date = ?", (str(target_user.id), today_str))
     conn.commit()
 
-    # 2. Kirim pesan pemberitahuan di channel absensi
+    # 2. Otomatis hapus pesan absen yang disilang (sama seperti saat format salah)
+    try:
+        await target_message.delete()
+    except Exception as e:
+        print(f"Gagal menghapus pesan target: {e}")
+
+    # 3. Kirim pesan pemberitahuan di channel absensi
     mod_mention_str = " ".join([f"<@&{r}>" for r in cfg["role_moderator_ids"]])
     await channel.send(
         f"⚠️ Absen milik {target_user.mention} dibatalkan oleh Moderator ({member.mention}) "
-        f"karena foto tidak sesuai ketentuan. Silakan kirim ulang.\n{mod_mention_str}"
+        f"karena foto tidak sesuai ketentuan. Silakan kirim ulang.\n{mod_mention_str}",
+        delete_after=20
     )
 
-    # 3. Kirim Log ke Channel Audit Log
+    # 4. Kirim Log ke Channel Audit Log
     await send_audit_log(
         guild,
         "🚫 Absen Dibatalkan oleh Moderator (Reaksi ❌)",
