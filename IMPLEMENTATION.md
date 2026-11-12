@@ -1,29 +1,57 @@
-# IMPLEMENTATION DOCUMENT: SETUP CI/CD & RUNNER GITHUB ACTIONS
+# IMPLEMENTATION DOCUMENT: GRACEFUL SHUTDOWN & FREE GIT BACKUP
 
-Dokumen ini menjabarkan panduan teknis langkah demi langkah untuk mengimplementasikan workflow GitHub Actions bagi bot absensi Discord (`sv-dc-attendance-bot`).
+Dokumen teknis ini memuat langkah implementasi *graceful shutdown* pada `bot.py` serta konfigurasi CI/CD estafet backup pada `.github/workflows/bot_runner.yml`.
 
 ---
 
-## 1. Pembuatan Dependensi `requirements.txt`
-Sebelum workflow dibuat, repositori harus memiliki file manifest dependensi Python standar:
-```text
-discord.py>=2.3.0
-pytz>=2023.3
-python-dotenv>=1.0.0
+## 1. Modifikasi Kode Program (`bot.py`)
+
+### 1.1 Penambahan Lifecycle Timer (295 Menit)
+Tambahkan background task atau coroutine async yang menghitung durasi sejak `on_ready`:
+```python
+import asyncio
+
+RUN_DURATION_MINUTES = 295  # 4 Jam 55 Menit
+
+async def graceful_shutdown_task():
+    await bot.wait_until_ready()
+    print(f"[LIFECYCLE] Bot aktif. Memulai timer estafet graceful shutdown: {RUN_DURATION_MINUTES} menit.")
+    await asyncio.sleep(RUN_DURATION_MINUTES * 60)
+    
+    print("[LIFECYCLE] Waktu estafet 295 menit tercapai. Memulai graceful shutdown...")
+    
+    # 1. Hentikan loop background task
+    if check_dynamic_schedules.is_running():
+        check_dynamic_schedules.stop()
+        
+    # 2. Pastikan transaksi database tersimpan rapi dan koneksi ditutup
+    try:
+        conn.commit()
+        conn.close()
+        print("[LIFECYCLE] Database SQLite berhasil dikomit dan ditutup dengan aman.")
+    except Exception as e:
+        print(f"[LIFECYCLE] Error saat menutup database: {e}")
+
+    # 3. Tutup koneksi Discord Gateway
+    try:
+        await bot.close()
+        print("[LIFECYCLE] Sesi Discord Gateway ditutup secara bersih (Exit Code 0).")
+    except Exception as e:
+        print(f"[LIFECYCLE] Error saat menutup sesi bot: {e}")
+```
+
+Daftarkan coroutine ini di dalam `on_ready()`:
+```python
+bot.loop.create_task(graceful_shutdown_task())
 ```
 
 ---
 
-## 2. Struktur Direktori & Konfigurasi Workflow YAML
-Workflow akan ditempatkan di `.github/workflows/bot_runner.yml`.
+## 2. Modifikasi Workflow GitHub Actions (`.github/workflows/bot_runner.yml`)
 
-### Arsitektur Workflow:
-- **Triggers**:
-  - `workflow_dispatch`: Memungkinkan admin menjalankan atau me-restart bot secara manual dari tab Actions GitHub.
-  - `push` pada branch `master`: Memastikan setiap update kode memicu CI check dan eksekusi.
-  - `schedule` (cron): Opsi penjadwalan periodik untuk menjaga kesinambungan bot sebelum batas timeout 6 jam VM GitHub tercapai.
+Workflow diperbarui untuk mengelola *permissions* Git (`contents: write`), langkah restorasi dari branch `db-backup`, dan langkah push otomatis pasca-eksekusi.
 
-### Contoh Rancangan YAML (`.github/workflows/bot_runner.yml`):
+### 2.1 Konfigurasi Lengkap YAML
 ```yaml
 name: Discord Attendance Bot Runner
 
@@ -32,17 +60,23 @@ on:
     branches: [ master ]
   workflow_dispatch:
   schedule:
-    # Trigger periodik setiap 5 jam untuk me-refresh runner sebelum batas 6 jam
+    # Trigger setiap 5 jam untuk menyambung estafet sebelum bot runner berhenti
     - cron: '0 */5 * * *'
+
+permissions:
+  contents: write
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350 # Sedikit di bawah batas absolut 360 menit GitHub
+    timeout-minutes: 350
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout Master Repository
         uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
 
       - name: Setup Python Runtime
         uses: actions/setup-python@v5
@@ -59,64 +93,70 @@ jobs:
         run: |
           python -m py_compile bot.py
 
-      - name: Restore SQLite Database State (If Cached)
-        uses: actions/cache/restore@v4
-        with:
-          path: attendance.db
-          key: attendance-db-${{ github.run_id }}
-          restore-keys: |
-            attendance-db-
+      - name: Restore SQLite Database from db-backup Branch
+        run: |
+          # Periksa apakah remote branch db-backup ada
+          if git ls-remote --heads origin db-backup | grep -q db-backup; then
+            echo "Memulihkan attendance.db dari branch db-backup..."
+            git fetch origin db-backup
+            git checkout origin/db-backup -- attendance.db || true
+            if [ -f attendance.db ]; then
+              echo "✅ attendance.db berhasil dipulihkan."
+            else
+              echo "ℹ️ attendance.db tidak ditemukan di db-backup, inisialisasi baru."
+            fi
+          else
+            echo "ℹ️ Branch db-backup belum ada. Database baru akan dibuat."
+          fi
 
-      - name: Execute Discord Bot
+      - name: Execute Discord Bot (Estafet 295 Menit)
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           LOG_CHANNEL_ID: ${{ secrets.LOG_CHANNEL_ID }}
         run: |
           python bot.py
 
-      - name: Save SQLite Database State
+      - name: Backup SQLite Database to db-backup Branch
         if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: attendance.db
-          key: attendance-db-${{ github.run_id }}
+        run: |
+          if [ -f attendance.db ]; then
+            echo "Mempersiapkan pencadangan attendance.db ke branch db-backup..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            
+            # Buat branch db-backup jika belum ada atau beralih ke orphan branch terisolasi
+            git checkout --orphan temp-db-backup || git checkout -b temp-db-backup
+            git rm -rf . || true
+            git checkout master -- .gitignore || true
+            
+            # Simpan file attendance.db
+            git add -f attendance.db
+            git commit -m "chore(backup): auto-save attendance.db state [skip ci]" || echo "Tidak ada perubahan data."
+            
+            # Push ke branch db-backup
+            git push origin temp-db-backup:db-backup --force
+            echo "✅ Snapshot attendance.db berhasil dicadangkan ke branch db-backup."
+          else
+            echo "⚠️ File attendance.db tidak ditemukan. Melewati langkah pencadangan."
+          fi
 ```
 
 ---
 
-## 3. Panduan Konfigurasi Repository Secrets di GitHub
-
-Admin atau pemilik repositori harus melakukan langkah berikut sebelum workflow dijalankan:
-
-1. Buka repositori `sv-dc-attendance-bot` di browser GitHub:
-   `https://github.com/kukuruYuuk69/sv-dc-attendance-bot`
-2. Klik tab **Settings** di navigasi atas repository.
-3. Pada sidebar sebelah kiri, pilih menu **Secrets and variables** -> **Actions**.
-4. Klik tombol hijau **New repository secret**.
-5. Masukkan rincian secret:
-   - **Name**: `DISCORD_TOKEN`
-   - **Secret**: Masukkan token bot Discord dari Discord Developer Portal.
-6. (Opsional) Tambahkan secret kedua:
-   - **Name**: `LOG_CHANNEL_ID`
-   - **Secret**: Masukkan ID channel Discord untuk audit log (misal `123456789012345678`).
-7. Klik **Add secret**.
+## 3. Matikan Host Bot Lokal
+Sebelum workflow Actions aktif secara berkala:
+- Jalankan perintah manajemen proses untuk menghentikan daemon bot lokal (`task-682` atau process python yang aktif).
+- Memastikan tidak ada token bot yang aktif bersamaan di host lokal.
 
 ---
 
-## 4. Testing & Verification Checklist
+## 4. Daftar Pengujian & Verifikasi (Testing Checklist)
 
-| No | Komponen Uji | Prosedur Pengujian | Hasil yang Diharapkan |
-| :--- | :--- | :--- | :--- |
-| 1 | **Lint & Compile** | Jalankan `python -m py_compile bot.py` di runner | Exit code 0, tidak ada error sintaks |
-| 2 | **Secrets Injection** | Periksa pembacaan `os.getenv("DISCORD_BOT_TOKEN")` | Token terbaca tanpa terpapar di log runner |
-| 3 | **Gateway Connection** | Pantau log step eksekusi pada tab Actions | Muncul log `[INFO] discord.client: logging in` dan `connected to Gateway` |
-| 4 | **Slash Commands Sync** | Verifikasi respon `bot.tree.sync()` di log Actions | Muncul pesan sinkronisasi seluruh slash commands |
-| 5 | **State Retention** | Periksa langkah `actions/cache` saat job selesai | File `attendance.db` tersimpan dan berhasil dipulihkan di run berikutnya |
-| 6 | **Manual Trigger** | Jalankan `Run workflow` dari menu Actions tab | Workflow berjalan lancar tanpa intervensi manual |
-
----
-
-## 5. Tahapan Eksekusi Lanjutan (Menunggu Konfirmasi Pengguna)
-1. Pembuatan file `requirements.txt`.
-2. Pembuatan direktori `.github/workflows/` dan file workflow `bot_runner.yml`.
-3. Verifikasi git status, commit, dan push ke branch `master`.
+| No | Skenario Uji | Indikator Keberhasilan |
+| :--- | :--- | :--- |
+| 1 | **Syntax Check** | `python -m py_compile bot.py` berhasil tanpa syntax error. |
+| 2 | **Timer Shutdown** | Log mencetak `[LIFECYCLE] Waktu estafet 295 menit tercapai` dan proses keluar dengan status `0`. |
+| 3 | **Database Flush** | `conn.commit()` dan `conn.close()` berhasil dijalankan tanpa exception. |
+| 4 | **Branch Creation** | Branch `db-backup` otomatis muncul di GitHub setelah run pertama selesai. |
+| 5 | **Database Restore** | Runner berikutnya membaca `attendance.db` yang berisi data dari run sebelumnya. |
+| 6 | **No Session Conflict** | Host lokal mati, Discord Gateway stabil tanpa warning `Session Invalidated`. |
