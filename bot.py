@@ -112,14 +112,14 @@ def get_guild_config(guild_id: int):
     cursor.execute("SELECT * FROM guild_config WHERE guild_id = ?", (gid_str,))
     row = cursor.fetchone()
 
-    # Fallback default dari environment
-    default_absen = os.getenv("ABSEN_CHANNEL_ID", "1570440259316088953")
-    default_rekap = os.getenv("REKAP_CHANNEL_ID", "1570460912572178443")
-    default_wajib_roles = [int(os.getenv("ROLE_WAJIB_ABSEN_ID", "1500083857591107744"))]
+    # Fallback default murni agnostik (tidak ada hardcode ID role)
+    default_absen = os.getenv("ABSEN_CHANNEL_ID", "0")
+    default_rekap = os.getenv("REKAP_CHANNEL_ID", "0")
+    default_wajib_roles = [int(os.getenv("ROLE_WAJIB_ABSEN_ID"))] if os.getenv("ROLE_WAJIB_ABSEN_ID") else []
     default_staff_roles = [
-        int(r.strip()) for r in os.getenv("ROLE_MODERATOR_IDS", "1500812071024197682,1500811613794599022").split(",") if r.strip()
+        int(r.strip()) for r in os.getenv("ROLE_MODERATOR_IDS", "").split(",") if r.strip()
     ]
-    default_ping_roles = default_staff_roles.copy()
+    default_ping_roles = []
 
     if not row:
         cfg = {
@@ -132,7 +132,7 @@ def get_guild_config(guild_id: int):
             "close_time": "22:00",
             "start_day": "monday",
             "templates": DEFAULT_TEMPLATES.copy(),
-            "ping_role_id": default_ping_roles[0] if default_ping_roles else None,
+            "ping_role_id": None,
             "ping_roles": default_ping_roles
         }
         cursor.execute(
@@ -149,7 +149,7 @@ def get_guild_config(guild_id: int):
                 cfg["close_time"],
                 cfg["start_day"],
                 json.dumps(cfg["templates"]),
-                str(cfg["ping_role_id"]) if cfg["ping_role_id"] else "",
+                "",
                 json.dumps(cfg["ping_roles"])
             )
         )
@@ -179,13 +179,11 @@ def get_guild_config(guild_id: int):
             p_roles = [int(x) for x in json.loads(row[10])]
         except Exception:
             p_roles = []
-    if not p_roles and len(row) > 9 and row[9]:
+    elif len(row) > 9 and row[9] and row[9].strip() and row[9].strip() != "None":
         try:
             p_roles = [int(row[9])]
         except Exception:
-            p_roles = default_ping_roles
-    if not p_roles:
-        p_roles = default_ping_roles
+            p_roles = []
 
     return {
         "guild_id": gid_str,
@@ -256,7 +254,7 @@ def render_attendance_template(cfg: dict) -> str:
             "Nama: \n"
             "Divisi: \n"
             "Status: Hadir\n"
-            f"Ping: {ping_mentions}"
+            f"Ping: {ping_mentions}".strip()
         )
 
     # Ganti placeholder multi-role jika ada
@@ -276,12 +274,22 @@ def render_attendance_template(cfg: dict) -> str:
             continue
         if "WAJIB MENYERTAKAN SCREENSHOT" in l_strip.upper() or "BUKTI KEHADIRAN" in l_strip.upper():
             continue
+        # Jika baris adalah Ping dan tidak ada role yang didaftarkan, cetak 'Ping: ' bersih tanpa tag
+        if l_strip.lower().startswith("ping:"):
+            if ping_mentions:
+                clean_lines.append(f"Ping: {ping_mentions}")
+            else:
+                clean_lines.append("Ping: ")
+            continue
         clean_lines.append(line)
     body_content = "\n".join(clean_lines).strip()
 
-    # Pastikan baris Ping ada di dalam form jika ada role terdaftar
-    if "ping:" not in body_content.lower() and ping_mentions:
-        body_content += f"\nPing: {ping_mentions}"
+    # Jika belum ada baris ping sama sekali, tambahkan baris ping
+    if "ping:" not in body_content.lower():
+        if ping_mentions:
+            body_content += f"\nPing: {ping_mentions}"
+        else:
+            body_content += "\nPing: "
 
     # Susun 3 bagian konsisten: Header, Code Block, Footer
     rendered = (
