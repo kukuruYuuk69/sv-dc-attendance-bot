@@ -753,6 +753,68 @@ async def slash_help(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ==========================================
+# INTERACTIVE ROLE SELECT VIEWS (MULTI-SELECT)
+# ==========================================
+class StaffRoleSelectView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+
+    @discord.ui.select(
+        cls=discord.ui.RoleSelect,
+        placeholder="Pilih 1 s/d 10 Role Staf Pengawas...",
+        min_values=1,
+        max_values=10
+    )
+    async def select_callback(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        # Validasi keamanan: hanya pemanggil asli (Owner/Admin) yang dapat berinteraksi
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Anda tidak memiliki izin untuk memilih role ini.", ephemeral=True)
+            return
+
+        selected_roles = select.values
+        selected_ids = [r.id for r in selected_roles]
+
+        update_guild_config(interaction.guild.id, "staff_roles", selected_ids)
+
+        roles_mentions = ", ".join([r.mention for r in selected_roles])
+        embed = discord.Embed(
+            title="✅ Role Staf Pengawas Berhasil Diperbarui",
+            description=f"Daftar role staf pengawas aktif:\n{roles_mentions}",
+            color=discord.Color.green()
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
+
+class AbsenRoleSelectView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+
+    @discord.ui.select(
+        cls=discord.ui.RoleSelect,
+        placeholder="Pilih 1 s/d 10 Role Wajib Absen...",
+        min_values=1,
+        max_values=10
+    )
+    async def select_callback(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Anda tidak memiliki izin untuk memilih role ini.", ephemeral=True)
+            return
+
+        selected_roles = select.values
+        selected_ids = [r.id for r in selected_roles]
+
+        update_guild_config(interaction.guild.id, "wajib_absen_roles", selected_ids)
+
+        roles_mentions = ", ".join([r.mention for r in selected_roles])
+        embed = discord.Embed(
+            title="✅ Role Wajib Absen Berhasil Diperbarui",
+            description=f"Daftar role wajib absen aktif:\n{roles_mentions}",
+            color=discord.Color.green()
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
+
+# ==========================================
 # COMMAND GROUP: /config
 # ==========================================
 config_group = app_commands.Group(name="config", description="Pengaturan dinamis bot absensi server")
@@ -787,6 +849,50 @@ async def config_show(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+@config_group.command(name="role_staff", description="Pilih role staf pengawas bot melalui menu interaktif (Multi-Select).")
+async def config_role_staff(interaction: discord.Interaction):
+    # Validasi Hak Akses: Server Owner atau Administrator
+    if not (interaction.user.guild_permissions.administrator or interaction.user.id == interaction.guild.owner_id):
+        await interaction.response.send_message("❌ Hanya Server Owner atau Administrator yang dapat mengatur role staf.", ephemeral=True)
+        return
+
+    cfg = get_guild_config(interaction.guild.id)
+    current_staff = ", ".join([f"<@&{r}>" for r in cfg["staff_roles"]]) or "Belum diatur"
+
+    embed = discord.Embed(
+        title="👥 Pengaturan Role Staf Pengawas (Multi-Select)",
+        description=(
+            f"**Role Saat Ini:** {current_staff}\n\n"
+            f"Silakan pilih **1 hingga 10 role** dari menu dropdown di bawah ini. "
+            f"Seluruh role yang dipilih akan memiliki hak akses sebagai staf/moderator bot."
+        ),
+        color=discord.Color.blue()
+    )
+    view = StaffRoleSelectView(author_id=interaction.user.id)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@config_group.command(name="role_absen", description="Pilih role wajib absen melalui menu interaktif (Multi-Select).")
+async def config_role_absen(interaction: discord.Interaction):
+    # Validasi Hak Akses: Server Owner atau Administrator
+    if not (interaction.user.guild_permissions.administrator or interaction.user.id == interaction.guild.owner_id):
+        await interaction.response.send_message("❌ Hanya Server Owner atau Administrator yang dapat mengatur role wajib absen.", ephemeral=True)
+        return
+
+    cfg = get_guild_config(interaction.guild.id)
+    current_wajib = ", ".join([f"<@&{r}>" for r in cfg["wajib_absen_roles"]]) or "Belum diatur"
+
+    embed = discord.Embed(
+        title="📋 Pengaturan Role Wajib Absen (Multi-Select)",
+        description=(
+            f"**Role Saat Ini:** {current_wajib}\n\n"
+            f"Silakan pilih **1 hingga 10 role** dari menu dropdown di bawah ini. "
+            f"Anggota dengan role tersebut wajib mengisi absensi harian dan masuk dalam rekapitulasi."
+        ),
+        color=discord.Color.blue()
+    )
+    view = AbsenRoleSelectView(author_id=interaction.user.id)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
 @config_group.command(name="ping_role", description="Tambah atau hapus role target yang di-mention pada baris Ping template absen.")
 @app_commands.describe(role="Role target yang akan di-mention", aksi="Pilih tambah atau hapus")
 async def config_ping_role(interaction: discord.Interaction, role: discord.Role, aksi: Literal["tambah", "hapus"]):
@@ -810,54 +916,6 @@ async def config_ping_role(interaction: discord.Interaction, role: discord.Role,
             await interaction.response.send_message(f"🗑️ Role {role.mention} berhasil dihapus dari daftar target ping.", ephemeral=True)
         else:
             await interaction.response.send_message(f"ℹ️ Role {role.mention} tidak ditemukan di daftar target ping.", ephemeral=True)
-
-@config_group.command(name="role_absen", description="Tambah atau hapus role wajib absen.")
-@app_commands.describe(role="Role yang ingin dikonfigurasi", aksi="Pilih tambah atau hapus")
-async def config_role_absen(interaction: discord.Interaction, role: discord.Role, aksi: Literal["tambah", "hapus"]):
-    if not check_is_staff(interaction):
-        await interaction.response.send_message("❌ Anda tidak memiliki izin.", ephemeral=True)
-        return
-
-    cfg = get_guild_config(interaction.guild.id)
-    roles = cfg["wajib_absen_roles"]
-    if aksi == "tambah":
-        if role.id not in roles:
-            roles.append(role.id)
-            update_guild_config(interaction.guild.id, "wajib_absen_roles", roles)
-            await interaction.response.send_message(f"✅ Role {role.mention} berhasil ditambahkan ke daftar wajib absen.", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"ℹ️ Role {role.mention} sudah ada di daftar wajib absen.", ephemeral=True)
-    else:
-        if role.id in roles:
-            roles.remove(role.id)
-            update_guild_config(interaction.guild.id, "wajib_absen_roles", roles)
-            await interaction.response.send_message(f"🗑️ Role {role.mention} berhasil dihapus dari daftar wajib absen.", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"ℹ️ Role {role.mention} tidak ditemukan di daftar wajib absen.", ephemeral=True)
-
-@config_group.command(name="role_staff", description="Tambah atau hapus role staf pengawas bot.")
-@app_commands.describe(role="Role staf", aksi="Pilih tambah atau hapus")
-async def config_role_staff(interaction: discord.Interaction, role: discord.Role, aksi: Literal["tambah", "hapus"]):
-    if not check_is_staff(interaction):
-        await interaction.response.send_message("❌ Anda tidak memiliki izin.", ephemeral=True)
-        return
-
-    cfg = get_guild_config(interaction.guild.id)
-    roles = cfg["staff_roles"]
-    if aksi == "tambah":
-        if role.id not in roles:
-            roles.append(role.id)
-            update_guild_config(interaction.guild.id, "staff_roles", roles)
-            await interaction.response.send_message(f"✅ Role staf {role.mention} berhasil ditambahkan.", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"ℹ️ Role {role.mention} sudah terdaftar sebagai staf.", ephemeral=True)
-    else:
-        if role.id in roles:
-            roles.remove(role.id)
-            update_guild_config(interaction.guild.id, "staff_roles", roles)
-            await interaction.response.send_message(f"🗑️ Role {role.mention} berhasil dihapus dari daftar staf.", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"ℹ️ Role {role.mention} tidak terdaftar di staf.", ephemeral=True)
 
 @config_group.command(name="jadwal", description="Atur jam buka dan tutup absensi dinas (format HH:MM WIB).")
 @app_commands.describe(jam_buka="Contoh: 07:00", jam_tutup="Contoh: 22:00")
