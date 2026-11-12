@@ -57,7 +57,19 @@ PROFESIONALISME ADALAH JATI DIRI."_
 
 Setia, waspada, jujur dan tanggung jawab.
 
-<@&1500083857591107744>"""
+<@&1500083857591107744>
+
+━━━━━━━━━━━━━━━━━━
+📋 **TEMPLATE ABSENSI:**
+```text
+Nama: 
+Pangkat: 
+Job: 
+Divisi: 
+Status: Hadir
+Ping: <@&1500812071024197682>
+```
+*(Wajib menyertakan screenshot/foto in-game)*"""
 
 # Template Teks Penutupan (22:00 WIB)
 CLOSING_MESSAGE = """# 【 WAKTU ISTIRAHAT TELAH TIBA 】

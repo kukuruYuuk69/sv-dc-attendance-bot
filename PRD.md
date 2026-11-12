@@ -53,6 +53,18 @@ PROFESIONALISME ADALAH JATI DIRI."_
 Setia, waspada, jujur dan tanggung jawab.
 
 <@&1500083857591107744>
+
+━━━━━━━━━━━━━━━━━━
+📋 **TEMPLATE ABSENSI:**
+```text
+Nama: 
+Pangkat: 
+Job: 
+Divisi: 
+Status: Hadir
+Ping: <@&1500812071024197682>
+```
+*(Wajib menyertakan screenshot/foto in-game)*
 ```
 
 ### 2.5 Pesan Penutupan Absen (Jam 22:00 WIB / 15:00 UTC)
