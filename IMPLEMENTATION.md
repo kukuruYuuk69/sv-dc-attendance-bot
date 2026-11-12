@@ -1,55 +1,59 @@
-# IMPLEMENTATION PLAN: ATTENDANCE & AUTOMATION BOT
+# IMPLEMENTATION PLAN: PEMBERSIHAN HARDCODE DEFAULT ROLE
 
-Dokumen ini menjabarkan rencana teknis, tahapan implementasi kode pada `bot.py`, serta daftar uji verifikasi (*testing checklist*) sesuai spesifikasi [REQUIREMENTS.md](file:///C:/Users/t495s/.gemini/antigravity/scratch/sv-dc-attendance-bot/REQUIREMENTS.md).
-
----
-
-## 1. Rencana Perubahan Teknis (`bot.py`)
-
-### 1.1 Modifikasi Fungsi Pembukaan Absen (`execute_opening`)
-- **Tindakan:**
-  1. Hapus variabel global `last_pinned_messages`.
-  2. Hapus blok kode pencarian pesan lama (`fetch_message`) dan pemanggilan `await old_msg.unpin()`.
-  3. Hapus baris pemanggilan `await new_msg.pin()`.
-  4. Sederhanakan fungsi: hanya merender teks pengumuman dan template presensi, lalu mengirimkannya via `await channel.send(full_message)`.
-
-### 1.2 Penyesuaian Logika Loop Background Task (`check_dynamic_schedules`)
-- **Tindakan:**
-  1. Saat waktu sekarang cocok dengan `cfg["close_time"]`:
-     - Hitung indeks hari awal `start_idx = DAY_MAP.get(cfg["start_day"].lower(), 0)`.
-     - Hitung indeks hari akhir siklus: `end_idx = (start_idx + 6) % 7`.
-     - Periksa apakah hari saat ini (`now_wib.weekday() == end_idx`).
-  2. Jika hari dan jam cocok:
-     - Ambil `rekap_channel` dari `cfg["rekap_channel_id"]`.
-     - Jalankan kalkulasi rekap mingguan dan kirimkan Embed laporan rekapitulasi secara otomatis ke saluran tersebut.
-
-### 1.3 Standarisasi Format Mention Interaktif Pengguna
-- **Tindakan:**
-  1. **Pada Fungsi Rekapitulasi (`/rekap` dan rekap otomatis):**
-     - Gunakan format konsisten: `f"✅ **{m.mention}** (`{m.display_name}`): **{count}x** Hadir"`.
-     - Format ini memastikan tag `@Member` berwarna biru khas Discord dan memunculkan pop-out profil server ketika diklik.
-  2. **Pada Command `/tegur`:**
-     - Tampilkan target member sebagai `member.mention` dan display name `member.display_name`.
-     - Pejabat pengawas dicantumkan sebagai `interaction.user.mention`.
-  3. **Pada Command `/reject`:**
-     - Tampilkan target member dan moderator pengawas dengan mention interaktif di saluran absensi dan audit log.
+Dokumen ini memuat panduan implementasi teknis pembersihan seluruh nilai sisa (*residual*) hardcode role pada `bot.py` sesuai [REQUIREMENTS.md](file:///C:/Users/t495s/.gemini/antigravity/scratch/sv-dc-attendance-bot/REQUIREMENTS.md).
 
 ---
 
-## 2. Testing Checklist (Daftar Pengujian Regresi)
+## 1. Rencana Perubahan Kode Teknis (`bot.py`)
 
-| No. | Skenario Uji | Prosedur Pengujian | Hasil yang Diharapkan |
+### 1.1 Putus Ketergantungan `.env` untuk Konfigurasi Role
+- Di dalam fungsi `get_guild_config()`:
+  - **Ubah:**
+    ```python
+    default_wajib_roles = (
+        [int(os.getenv("ROLE_WAJIB_ABSEN_ID"))]
+        if os.getenv("ROLE_WAJIB_ABSEN_ID")
+        else []
+    )
+    default_staff_roles = [
+        int(r.strip())
+        for r in os.getenv("ROLE_MODERATOR_IDS", "").split(",")
+        if r.strip()
+    ]
+    default_ping_roles = []
+```
+  - **Menjadi:**
+    ```python
+    default_wajib_roles = []
+    default_staff_roles = []
+    default_ping_roles = []
+    default_absen = 0
+    default_rekap = 0
+```
+  - Ini memastikan bahwa server mana pun yang baru masuk atau di-reset akan selalu memiliki konfigurasi awal yang **bersih tanpa sisa ID server lain**.
+
+### 1.2 Sanitasi Render Role pada `/config show`
+- Saat merender string mention role di `/config show`:
+  - Periksa apakah role ID tersebut valid dan benar-benar ada di dalam server (`guild.get_role(r_id)`).
+  - Abaikan role ID yang menghasilkan `None` (misalnya role sudah dihapus atau role dari server lain).
+  - Jika hasil filter kosong: Tampilkan `"Belum diatur"`.
+
+### 1.3 Pembersihan File `.env` Lokal
+- Rapikan file `.env` di lingkungan bot agar hanya berisi kredensial bot Discord (`DISCORD_BOT_TOKEN`) dan tidak lagi menyimpan `ROLE_WAJIB_ABSEN_ID` atau ID channel lama.
+
+---
+
+## 2. Testing Checklist (Verifikasi Clean State)
+
+| No. | Skenario Pengujian | Langkah Pengujian | Hasil yang Diharapkan |
 | :---: | :--- | :--- | :--- |
-| 1 | **Buka Absen Tanpa Pin** | Jalankan `/buka_absen` di Discord. | Pesan pembukaan dan template terkirim ke channel, tetapi **TIDAK ada pin** yang terpasang di channel. |
-| 2 | **Tutup Absen Manual** | Jalankan `/tutup_absen` di Discord. | Pesan penutupan dinas terkirim dengan benar. |
-| 3 | **Rekapitulasi On-Demand** | Jalankan `/rekap` di Discord. | Embed rekapitulasi muncul dengan nama pengguna yang dapat diklik (`member.mention`) dan tombol paginasi berfungsi. |
-| 4 | **Teguran Resmi** | Jalankan `/tegur member:@User pesan:Uji coba`. | Embed teguran kedisiplinan terkirim dengan tag user yang dapat diklik. |
-| 5 | **Pembatalan Absen** | Jalankan `/reject member:@User alasan:Foto salah`. | Absensi hari itu dihapus dan notifikasi pembatalan muncul dengan mention interaktif. |
-| 6 | **Pemeriksaan Jadwal Background** | Biarkan scheduler berjalan per menit. | Tidak ada error log pada console dan pembukaan/penutupan berjalan tepat waktu. |
+| 1 | **Reset Konfigurasi Bersih** | Jalankan `/config reset` di server Discord. | Konfigurasi server ter-reset dan bot mengonfirmasi berhasil. |
+| 2 | **Pengecekan Tampilan Awal** | Jalankan `/config show` setelah reset. | - Saluran Absensi: `Belum diatur`<br>- Saluran Rekap: `Belum diatur`<br>- Role Wajib Absen: **`Belum diatur`** (TIDAK ADA `@unknown-role`)<br>- Role Staf Pengawas: **`Belum diatur`**<br>- Role Target Ping: **`Belum diatur`** |
+| 3 | **Setup Role via Menu** | Jalankan `/config role_absen` lalu pilih role dari dropdown multi-select. | Role yang dipilih tersimpan dan hanya role tersebut yang muncul di `/config show`. |
+| 4 | **Pengecekan Server Baru (`on_guild_join`)** | Simulasi server baru bergabung. | Server otomatis mendapatkan default `wajib_absen_roles: []` dan `staff_roles: []`. |
 
 ---
 
 ## 3. Langkah Komitmen & Konfirmasi
-1. Dokumen [REQUIREMENTS.md](file:///C:/Users/t495s/.gemini/antigravity/scratch/sv-dc-attendance-bot/REQUIREMENTS.md) dan [IMPLEMENTATION.md](file:///C:/Users/t495s/.gemini/antigravity/scratch/sv-dc-attendance-bot/IMPLEMENTATION.md) disimpan di root direktori.
-2. Melakukan commit Git dan push ke branch `master`.
-3. Menunggu konfirmasi persetujuan dari pengguna sebelum mengeksekusi modifikasi di `bot.py`.
+1. Berkas [REQUIREMENTS.md](file:///C:/Users/t495s/.gemini/antigravity/scratch/sv-dc-attendance-bot/REQUIREMENTS.md) dan [IMPLEMENTATION.md](file:///C:/Users/t495s/.gemini/antigravity/scratch/sv-dc-attendance-bot/IMPLEMENTATION.md) di-commit ke branch `master`.
+2. Menunggu konfirmasi persetujuan dari pengguna sebelum mengeksekusi kode di `bot.py` dan `.env`.
