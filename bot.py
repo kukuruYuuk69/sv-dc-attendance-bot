@@ -1408,8 +1408,8 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         fields={"Member": target_user.name, "Staff": member.name, "Tanggal": today_str}
     )
 
-token = os.getenv("DISCORD_BOT_TOKEN")
+token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
 if token:
     bot.run(token)
 else:
-    print("Error: DISCORD_BOT_TOKEN tidak ditemukan di environment variables.")
+    print("Error: DISCORD_BOT_TOKEN atau DISCORD_TOKEN tidak ditemukan di environment variables.")
