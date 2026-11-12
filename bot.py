@@ -157,17 +157,17 @@ async def on_message(message):
         if is_wajib:
             content = message.content
 
-            # Validasi 1: Cek apakah sudah pernah berhasil absen hari ini (Cegah & Hapus Absen Ganda)
-            cursor.execute("SELECT * FROM attendance WHERE user_id = ? AND date = ?", (str(message.author.id), today_str))
-            if cursor.fetchone():
-                await message.delete()
-                await message.channel.send(
-                    f"⚠️ {message.author.mention} Kamu sudah berhasil absen hari ini ({today_str}). Tidak diperbolehkan mengirim absen ganda!",
-                    delete_after=15
-                )
-                return
+            # [FASE UJI COBA] Pengecekan absen ganda dinonaktifkan sementara agar member/admin bisa testing berkali-kali.
+            # cursor.execute("SELECT * FROM attendance WHERE user_id = ? AND date = ?", (str(message.author.id), today_str))
+            # if cursor.fetchone():
+            #     await message.delete()
+            #     await message.channel.send(
+            #         f"⚠️ {message.author.mention} Kamu sudah berhasil absen hari ini ({today_str}). Tidak diperbolehkan mengirim absen ganda!",
+            #         delete_after=15
+            #     )
+            #     return
 
-            # Validasi 2: Wajib Melampirkan Foto / Screenshot
+            # Validasi 1: Wajib Melampirkan Foto / Screenshot
             if not message.attachments:
                 await message.delete()
                 await message.channel.send(
@@ -176,7 +176,7 @@ async def on_message(message):
                 )
                 return
 
-            # Validasi 3: Template Teks Absensi Wajib
+            # Validasi 2: Template Teks Absensi Wajib
             required_fields = ["Nama:", "Pangkat:", "Job:", "Divisi:", "Status: Hadir", "<@&1500812071024197682>"]
             missing_fields = [f for f in required_fields if f not in content]
             if missing_fields:
@@ -198,8 +198,8 @@ async def on_message(message):
                 )
                 return
 
-            # Absen Diterima & Tercatat
-            cursor.execute("INSERT INTO attendance (user_id, date) VALUES (?, ?)", (str(message.author.id), today_str))
+            # Absen Diterima & Tercatat (Gunakan INSERT OR REPLACE agar testing berulang tidak memicu database constraint error)
+            cursor.execute("INSERT OR REPLACE INTO attendance (user_id, date) VALUES (?, ?)", (str(message.author.id), today_str))
             conn.commit()
             await message.add_reaction("✅")
 
