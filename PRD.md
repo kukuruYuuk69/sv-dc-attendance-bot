@@ -1,7 +1,7 @@
 # PRD: Discord Attendance & Automation Bot (SV DC)
 
 ## 1. Tujuan Proyek
-Membuat bot Discord otomatis multi-server berbasis Discord Slash Commands (`/`) dan database konfigurasi dinamis (`attendance.db`) untuk mengelola absensi member wajib absen dengan validasi ketat, auto lock/unlock channel, auto-pin pengumuman dinas, layout template standar, konfigurasi ping role dinamis, penolakan otomatis/manual, sistem audit log, serta rekapitulasi mingguan berhalaman (Embed pagination) dan peringatan pelanggaran beruntun.
+Membuat bot Discord otomatis multi-server berbasis Discord Slash Commands (`/`) dan database konfigurasi dinamis (`attendance.db`) untuk mengelola absensi member wajib absen dengan validasi ketat, auto lock/unlock channel, auto-pin pengumuman dinas, layout template standar, konfigurasi ping role dinamis & terintegrasi, fitur reset konfigurasi, penolakan otomatis/manual, sistem audit log, serta rekapitulasi mingguan berhalaman (Embed pagination) dan peringatan pelanggaran beruntun.
 
 ## 2. Fitur & Arsitektur Utama
 
@@ -34,10 +34,11 @@ Template absensi yang dikirim oleh bot memiliki tata letak 3 bagian yang konsist
 
 ### 2.3 Command Group Pengaturan Server (`/config`)
 - `/config show`: Menampilkan ringkasan konfigurasi server aktif dalam bentuk Embed (`ephemeral=True`).
+- `/config template` (`jenis: opening/closing/absen/teguran/peringatan`, `teks`, `role_ping` [opsional]): Kustomisasi teks template dan role yang di-mention secara terstruktur.
+- `/config reset`: Mengembalikan pengaturan server ke setelan awal (*default* PASPAMPRES) dengan menghapus data kustom di database (`ephemeral=True`).
 - `/config ping_role` (`role: discord.Role`): Mengatur role yang otomatis di-mention pada baris `Ping:` di template absensi.
 - `/config role_absen` (`role`, `aksi: tambah/hapus`): Atur role wajib absen.
 - `/config role_staff` (`role`, `aksi: tambah/hapus`): Atur role staf pengawas (Admin/Moderator).
 - `/config jadwal` (`jam_buka`, `jam_tutup`): Atur jam buka dan tutup absensi dinas (WIB).
 - `/config hari_awal` (`hari`): Atur hari permulaan siklus 7 hari rekapitulasi mingguan.
 - `/config channel` (`tipe: absensi/rekap`, `channel`): Atur saluran absensi atau rekap.
-- `/config template` (`jenis`, `teks`): Kustomisasi template teks pesan dinamis.

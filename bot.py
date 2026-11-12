@@ -245,16 +245,17 @@ def render_attendance_template(cfg: dict) -> str:
     ping_role_id = cfg.get("ping_role_id") or 1500812071024197682
     tmpl = cfg.get("templates", {})
 
-    # Ambil fields form jika ada, atau buat dari template default
-    if "absen_fields" in tmpl:
-        fields_str = tmpl["absen_fields"].format(ping_role_id=ping_role_id)
-    elif "absen" in tmpl:
-        # Jika template disimpan utuh, ekstrak atau gunakan langsung
-        raw_absen = tmpl["absen"]
-        if "```" in raw_absen:
-            # Gunakan yang sudah tersimpan
-            return raw_absen.replace("{ping_role_id}", str(ping_role_id))
-        fields_str = raw_absen
+    # Periksa apakah ada template absen khusus
+    custom_absen = tmpl.get("absen")
+    if isinstance(custom_absen, dict):
+        fields_str = custom_absen.get("teks", "")
+        custom_ping = custom_absen.get("role_ping_id")
+        if custom_ping:
+            ping_role_id = custom_ping
+    elif isinstance(custom_absen, str):
+        fields_str = custom_absen
+    elif "absen_fields" in tmpl:
+        fields_str = tmpl["absen_fields"]
     else:
         fields_str = (
             "Nama: \n"
@@ -262,18 +263,55 @@ def render_attendance_template(cfg: dict) -> str:
             "Job: \n"
             "Divisi: \n"
             "Status: Hadir\n"
-            f"Ping: <@&{ping_role_id}>"
+            "Ping: <@&{ping_role_id}>"
         )
+
+    # Format ping_role_id jika ada placeholder
+    if "{ping_role_id}" in fields_str:
+        fields_str = fields_str.replace("{ping_role_id}", str(ping_role_id))
+    elif "Ping:" in fields_str and "<@&" not in fields_str:
+        fields_str = re.sub(r"Ping:.*", f"Ping: <@&{ping_role_id}>", fields_str)
+
+    # Bersihkan markdown backtick jika user menyertakannya di teks input
+    clean_fields = fields_str.replace("```text", "").replace("```", "").strip()
+
+    # Hapus header dan footer duplikat jika teks input user menyertakannya
+    clean_lines = []
+    for line in clean_fields.splitlines():
+        l_strip = line.strip()
+        if "TEMPLATE ABSENSI" in l_strip.upper():
+            continue
+        if "WAJIB MENYERTAKAN SCREENSHOT" in l_strip.upper():
+            continue
+        clean_lines.append(line)
+    body_content = "\n".join(clean_lines).strip()
+
+    # Pastikan baris Ping ada di dalam form
+    if "ping:" not in body_content.lower():
+        body_content += f"\nPing: <@&{ping_role_id}>"
 
     # Susun 3 bagian konsisten: Header, Code Block, Footer
     rendered = (
         "📋 **TEMPLATE ABSENSI:**\n"
         "```text\n"
-        f"{fields_str.strip()}\n"
+        f"{body_content}\n"
         "```\n"
         "*(Wajib menyertakan screenshot/foto in-game)*"
     )
     return rendered
+
+# Helper: Ambil Teks Template Dinamis Lainnya
+def get_rendered_template_text(cfg: dict, jenis: str, default_val: str) -> str:
+    tmpl = cfg.get("templates", {}).get(jenis)
+    if isinstance(tmpl, dict):
+        teks = tmpl.get("teks", default_val)
+        role_ping = tmpl.get("role_ping_id")
+        if role_ping and f"<@&{role_ping}>" not in teks:
+            teks += f"\n\n<@&{role_ping}>"
+        return teks
+    elif isinstance(tmpl, str):
+        return tmpl
+    return default_val
 
 # Helper Validasi Staf (Admin & Moderator)
 def check_is_staff(interaction: discord.Interaction) -> bool:
@@ -341,7 +379,7 @@ async def execute_opening(channel: discord.TextChannel, cfg: dict):
             except Exception:
                 pass
 
-        open_text = cfg["templates"].get("opening", DEFAULT_TEMPLATES["opening"])
+        open_text = get_rendered_template_text(cfg, "opening", DEFAULT_TEMPLATES["opening"])
         absen_template = render_attendance_template(cfg)
         full_message = f"{open_text}\n\n━━━━━━━━━━━━━━━━━━\n{absen_template}"
 
@@ -355,7 +393,7 @@ async def execute_opening(channel: discord.TextChannel, cfg: dict):
 
 async def execute_closing(channel: discord.TextChannel, cfg: dict):
     try:
-        close_text = cfg["templates"].get("closing", DEFAULT_TEMPLATES["closing"])
+        close_text = get_rendered_template_text(cfg, "closing", DEFAULT_TEMPLATES["closing"])
         await channel.send(close_text)
         return True
     except Exception as e:
@@ -747,17 +785,73 @@ async def config_channel(interaction: discord.Interaction, tipe: Literal["absens
     await interaction.response.send_message(f"✅ Saluran **{tipe}** berhasil diarahkan ke: {channel.mention}.", ephemeral=True)
 
 @config_group.command(name="template", description="Kustomisasi template teks pesan bot.")
-@app_commands.describe(jenis="Pilih template yang ingin diubah", teks="Teks template baru")
-async def config_template(interaction: discord.Interaction, jenis: Literal["opening", "closing", "teguran", "peringatan"], teks: str):
+@app_commands.describe(
+    jenis="Pilih template yang ingin diubah",
+    teks="Teks template baru",
+    role_ping="Role target opsional yang otomatis di-ping pada template ini"
+)
+async def config_template(
+    interaction: discord.Interaction,
+    jenis: Literal["opening", "closing", "absen", "teguran", "peringatan"],
+    teks: str,
+    role_ping: discord.Role = None
+):
     if not check_is_staff(interaction):
         await interaction.response.send_message("❌ Anda tidak memiliki izin.", ephemeral=True)
         return
 
     cfg = get_guild_config(interaction.guild.id)
     templates = cfg["templates"]
-    templates[jenis] = teks
+
+    role_ping_id = role_ping.id if role_ping else None
+
+    # Simpan dalam format terstruktur JSON
+    templates[jenis] = {
+        "teks": teks,
+        "role_ping_id": role_ping_id
+    }
+
+    # Jika yang diubah adalah template absen dan role_ping disertakan, sinkronkan ping_role_id
+    if jenis == "absen" and role_ping_id:
+        update_guild_config(interaction.guild.id, "ping_role_id", role_ping_id)
+
     update_guild_config(interaction.guild.id, "templates", templates)
-    await interaction.response.send_message(f"✅ Template teks **{jenis}** berhasil diperbarui!", ephemeral=True)
+
+    ping_info = f" dengan target ping {role_ping.mention}" if role_ping else ""
+    await interaction.response.send_message(
+        f"✅ Template teks **{jenis}** berhasil diperbarui{ping_info}!",
+        ephemeral=True
+    )
+
+@config_group.command(name="reset", description="Kembalikan seluruh pengaturan server ke setelan awal (default).")
+async def config_reset(interaction: discord.Interaction):
+    if not check_is_staff(interaction):
+        await interaction.response.send_message("❌ Anda tidak memiliki izin untuk mereset pengaturan.", ephemeral=True)
+        return
+
+    gid_str = str(interaction.guild.id)
+    cursor.execute("DELETE FROM guild_config WHERE guild_id = ?", (gid_str,))
+    conn.commit()
+
+    # Reset cache in-memory jika ada
+    last_pinned_messages.pop(interaction.guild.id, None)
+
+    # Re-inisialisasi konfigurasi default
+    _ = get_guild_config(interaction.guild.id)
+
+    embed = discord.Embed(
+        title="🔄 Reset Konfigurasi Berhasil",
+        description=(
+            f"Seluruh pengaturan kustom untuk server **{interaction.guild.name}** "
+            f"telah dihapus dari database dan dikembalikan ke **setelan default PASPAMPRES**.\n\n"
+            f"• **Jadwal Dinas:** `07:00` - `22:00` WIB\n"
+            f"• **Hari Awal Rekap:** Senin\n"
+            f"• **Template:** Format resmi PASPAMPRES"
+        ),
+        color=discord.Color.green(),
+        timestamp=datetime.now(pytz.UTC)
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 bot.tree.add_command(config_group)
 
