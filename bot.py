@@ -368,29 +368,14 @@ async def send_audit_log(guild: discord.Guild, title: str, description: str, col
     except Exception:
         pass
 
-# Helper Pembukaan & Penutupan Dinas
-last_pinned_messages = {}
-
 async def execute_opening(channel: discord.TextChannel, cfg: dict):
-    global last_pinned_messages
     try:
-        guild_id = channel.guild.id
-        old_pinned_id = last_pinned_messages.get(guild_id)
-        if old_pinned_id:
-            try:
-                old_msg = await channel.fetch_message(old_pinned_id)
-                if old_msg.pinned:
-                    await old_msg.unpin()
-            except Exception:
-                pass
-
         open_text = get_rendered_template_text(cfg, "opening", DEFAULT_TEMPLATES["opening"])
         absen_template = render_attendance_template(cfg)
         full_message = f"{open_text}\n\n━━━━━━━━━━━━━━━━━━\n{absen_template}"
 
-        new_msg = await channel.send(full_message)
-        await new_msg.pin()
-        last_pinned_messages[guild_id] = new_msg.id
+        # Kirim pengumuman pembukaan dan template bersih tanpa auto-pin
+        await channel.send(full_message)
         return True
     except Exception as e:
         print(f"Error opening announcement: {e}")
@@ -544,7 +529,77 @@ async def slash_tutup_absen(interaction: discord.Interaction):
     else:
         await interaction.followup.send("❌ Terjadi kendala saat menutup sesi absensi.", ephemeral=True)
 
-# 3. View Paginasi untuk /rekap
+# Helper Pembagian Halaman Rekapitulasi Mingguan
+def build_recap_pages(guild: discord.Guild, cfg: dict):
+    start_date, end_date, current_week_key = get_week_cycle_bounds(cfg["start_day"])
+
+    # Cari seluruh member yang memiliki salah satu role wajib absen
+    target_members = []
+    for m in guild.members:
+        if m.bot:
+            continue
+        if any(r.id in cfg["wajib_absen_roles"] for r in m.roles):
+            target_members.append(m)
+
+    # Query absensi dalam siklus 7 hari
+    cursor.execute(
+        "SELECT user_id, COUNT(DISTINCT date) as cnt FROM attendance WHERE date >= ? AND date <= ? GROUP BY user_id",
+        (start_date, end_date)
+    )
+    attendance_map = dict(cursor.fetchall())
+
+    normal_list = []
+    violating_list = []
+
+    for m in target_members:
+        c = attendance_map.get(str(m.id), 0)
+        if c >= 3:
+            normal_list.append((m, c))
+        else:
+            violating_list.append((m, c))
+
+    normal_list.sort(key=lambda x: x[1], reverse=True)
+    violating_list.sort(key=lambda x: x[1])
+
+    pages = []
+
+    # Halaman 1: Ringkasan & Anggota Disiplin
+    embed1 = discord.Embed(
+        title="📊 REKAPITULASI KEHADIRAN MINGGUAN",
+        description=(
+            f"**Periode Siklus:** `{start_date}` s/d `{end_date}`\n"
+            f"**Total Anggota Wajib Absen:** {len(target_members)} Orang\n"
+            f"**Standar Kehadiran:** Minimal 3x Hadir\n"
+            f"**Hari Awal Siklus:** {cfg['start_day'].capitalize()}"
+        ),
+        color=discord.Color.blue(),
+        timestamp=datetime.now(pytz.UTC)
+    )
+
+    disciplined_lines = [f"✅ **{m.mention}** (`{m.display_name}`): **{c}x** Hadir" for m, c in normal_list]
+    chunk_text = "\n".join(disciplined_lines[:25]) if disciplined_lines else "Belum ada anggota yang mencapai 3x hadir."
+    embed1.add_field(name=f"🟢 Anggota Memenuhi Standar (>= 3x) — [{len(normal_list)}]", value=chunk_text[:1024], inline=False)
+    if len(disciplined_lines) > 25:
+        embed1.add_field(name="🟢 Anggota Memenuhi Standar (Lanjutan)", value="\n".join(disciplined_lines[25:50])[:1024], inline=False)
+    embed1.set_footer(text="Sistem Rekapitulasi Presensi • Halaman 1")
+    pages.append(embed1)
+
+    # Halaman 2: Anggota Kurang dari 3x Hadir
+    embed2 = discord.Embed(
+        title="⚠️ DAFTAR ANGGOTA KURANG DARI 3X HADIR",
+        description=f"Anggota berikut belum memenuhi standar kehadiran pada periode `{start_date}` s/d `{end_date}`.",
+        color=discord.Color.gold(),
+        timestamp=datetime.now(pytz.UTC)
+    )
+    viol_lines = [f"⚠️ **{m.mention}** (`{m.display_name}`): Hanya **{c}x** Hadir" for m, c in violating_list]
+    viol_chunk = "\n".join(viol_lines[:25]) if viol_lines else "Seluruh anggota memenuhi standar minimal!"
+    embed2.add_field(name=f"🟡 Anggota Perlu Tindak Lanjut (< 3x) — [{len(violating_list)}]", value=viol_chunk[:1024], inline=False)
+    if len(viol_lines) > 25:
+        embed2.add_field(name="🟡 Anggota Perlu Tindak Lanjut (Lanjutan)", value="\n".join(viol_lines[25:50])[:1024], inline=False)
+    embed2.set_footer(text="Sistem Rekapitulasi Presensi • Halaman 2")
+    pages.append(embed2)
+
+    return pages, target_members, normal_list, violating_list
 class RecapPaginationView(discord.ui.View):
     def __init__(self, pages: list[discord.Embed]):
         super().__init__(timeout=180)
@@ -584,76 +639,7 @@ async def slash_rekap(interaction: discord.Interaction):
 
     await interaction.response.defer(ephemeral=False)
     cfg = get_guild_config(interaction.guild.id)
-    guild = interaction.guild
-
-    start_date, end_date, current_week_key = get_week_cycle_bounds(cfg["start_day"])
-
-    # Cari seluruh member yang memiliki salah satu role wajib absen
-    target_members = []
-    for m in guild.members:
-        if m.bot:
-            continue
-        if any(r.id in cfg["wajib_absen_roles"] for r in m.roles):
-            target_members.append(m)
-
-    # Query absensi dalam siklus 7 hari
-    cursor.execute(
-        "SELECT user_id, COUNT(DISTINCT date) as cnt FROM attendance WHERE date >= ? AND date <= ? GROUP BY user_id",
-        (start_date, end_date)
-    )
-    attendance_map = dict(cursor.fetchall())
-
-    normal_list = []
-    violating_list = []
-
-    for m in target_members:
-        c = attendance_map.get(str(m.id), 0)
-        if c >= 3:
-            normal_list.append((m, c))
-        else:
-            violating_list.append((m, c))
-
-    normal_list.sort(key=lambda x: x[1], reverse=True)
-    violating_list.sort(key=lambda x: x[1])
-
-    # Bangun Halaman Embed
-    pages = []
-
-    # Halaman 1: Ringkasan & Personel Disiplin
-    embed1 = discord.Embed(
-        title="📊 REKAPITULASI KEHADIRAN MINGGUAN",
-        description=(
-            f"**Periode Siklus:** `{start_date}` s/d `{end_date}`\n"
-            f"**Total Anggota Wajib Absen:** {len(target_members)} Orang\n"
-            f"**Standar Kehadiran:** Minimal 3x Hadir\n"
-            f"**Hari Awal Siklus:** {cfg['start_day'].capitalize()}"
-        ),
-        color=discord.Color.blue(),
-        timestamp=datetime.now(pytz.UTC)
-    )
-
-    disciplined_lines = [f"✅ **{m.mention}** (`{m.display_name}`): **{c}x** Hadir" for m, c in normal_list]
-    chunk_text = "\n".join(disciplined_lines[:25]) if disciplined_lines else "Belum ada anggota yang mencapai 3x hadir."
-    embed1.add_field(name=f"🟢 Anggota Memenuhi Standar (>= 3x) — [{len(normal_list)}]", value=chunk_text[:1024], inline=False)
-    if len(disciplined_lines) > 25:
-        embed1.add_field(name="🟢 Anggota Memenuhi Standar (Lanjutan)", value="\n".join(disciplined_lines[25:50])[:1024], inline=False)
-    embed1.set_footer(text="Sistem Rekapitulasi Presensi • Halaman 1")
-    pages.append(embed1)
-
-    # Halaman 2: Personel Melanggar (<3x)
-    embed2 = discord.Embed(
-        title="⚠️ DAFTAR ANGGOTA KURANG DARI 3X HADIR",
-        description=f"Anggota berikut belum memenuhi standar kehadiran pada periode `{start_date}` s/d `{end_date}`.",
-        color=discord.Color.gold(),
-        timestamp=datetime.now(pytz.UTC)
-    )
-    viol_lines = [f"⚠️ **{m.mention}** (`{m.display_name}`): Hanya **{c}x** Hadir" for m, c in violating_list]
-    viol_chunk = "\n".join(viol_lines[:25]) if viol_lines else "Seluruh anggota memenuhi standar minimal!"
-    embed2.add_field(name=f"🟡 Anggota Perlu Tindak Lanjut (< 3x) — [{len(violating_list)}]", value=viol_chunk[:1024], inline=False)
-    if len(viol_lines) > 25:
-        embed2.add_field(name="🟡 Anggota Perlu Tindak Lanjut (Lanjutan)", value="\n".join(viol_lines[25:50])[:1024], inline=False)
-    embed2.set_footer(text="Sistem Rekapitulasi Presensi • Halaman 2")
-    pages.append(embed2)
+    pages, _, _, _ = build_recap_pages(interaction.guild, cfg)
 
     view = RecapPaginationView(pages)
     await interaction.followup.send(embed=pages[0], view=view)
@@ -990,6 +976,7 @@ async def config_template(
         ephemeral=True
     )
 
+# 8. /config reset
 @config_group.command(name="reset", description="Kembalikan seluruh pengaturan server ke setelan awal (default agnostik).")
 async def config_reset(interaction: discord.Interaction):
     if not check_is_staff(interaction):
@@ -999,8 +986,6 @@ async def config_reset(interaction: discord.Interaction):
     gid_str = str(interaction.guild.id)
     cursor.execute("DELETE FROM guild_config WHERE guild_id = ?", (gid_str,))
     conn.commit()
-
-    last_pinned_messages.pop(interaction.guild.id, None)
 
     # Re-inisialisasi konfigurasi default
     _ = get_guild_config(interaction.guild.id)
@@ -1054,6 +1039,35 @@ async def check_dynamic_schedules():
                     last_executed_close_minute[guild.id] = current_time_str
                     print(f"[{guild.name}] Trigger otomatis jadwal tutup dinas: {current_time_str} WIB")
                     await execute_closing(absen_channel, cfg)
+
+                    # Pengecekan Dinamis: Apakah hari ini adalah hari penutupan siklus mingguan (6 hari setelah start_day)?
+                    start_idx = DAY_MAP.get(cfg["start_day"].lower(), 0)
+                    end_idx = (start_idx + 6) % 7
+
+                    if now_wib.weekday() == end_idx:
+                        print(f"[{guild.name}] Hari ini hari penutupan siklus mingguan ({cfg['start_day'].capitalize()} -> hari ke-7). Menjalankan rekap otomatis...")
+                        rekap_channel = guild.get_channel(cfg["rekap_channel_id"])
+                        if rekap_channel:
+                            try:
+                                pages, _, _, violating_list = build_recap_pages(guild, cfg)
+                                if pages:
+                                    # Kirim Embed Halaman 1 (Ringkasan)
+                                    await rekap_channel.send(embed=pages[0])
+                                    # Kirim Embed Halaman 2 (Daftar Pelanggaran) jika ada
+                                    if len(pages) > 1 and violating_list:
+                                        await rekap_channel.send(embed=pages[1])
+
+                                    # Notifikasi mention staf pengawas jika terdapat anggota melanggar (<3x)
+                                    ping_mentions = get_ping_roles_mentions(cfg.get("ping_roles", []))
+                                    if violating_list and ping_mentions:
+                                        viol_mentions = " ".join([m.mention for m, _ in violating_list])
+                                        await rekap_channel.send(
+                                            f"⚠️ **EVALUASI KEDISIPLINAN MINGGUAN** ⚠️\n"
+                                            f"Anggota berikut tercatat kurang dari 3x hadir pada siklus ini: {viol_mentions}\n"
+                                            f"Pemberitahuan kepada Staf Pengawas: {ping_mentions}"
+                                        )
+                            except Exception as e_rekap:
+                                print(f"Error eksekusi rekap mingguan otomatis di {guild.name}: {e_rekap}")
         except Exception as e:
             print(f"Error pada loop jadwal guild {guild.id}: {e}")
 
