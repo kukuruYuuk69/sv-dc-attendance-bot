@@ -35,7 +35,18 @@ cursor.execute('''
 conn.commit()
 
 # Template Teks Pembukaan (07:00 WIB)
-OPENING_MESSAGE = """⏰ 【 SINYAL DINAS ON DUTY DIMULAI 】⏰
+TEMPLATE_ABSEN_HINT = """📋 **TEMPLATE ABSENSI:**
+```text
+Nama: 
+Pangkat: 
+Job: 
+Divisi: 
+Status: Hadir
+Ping: <@&1500812071024197682>
+```
+*(Wajib menyertakan screenshot/foto in-game)*"""
+
+OPENING_MESSAGE = f"""⏰ 【 SINYAL DINAS ON DUTY DIMULAI 】⏰
 
 Perhatian seluruh anggota PASPAMPRES,
 waktu dinas telah dimulai. Segera siapkan diri dan fokus pada pelaksanaan tugas.
@@ -60,16 +71,7 @@ Setia, waspada, jujur dan tanggung jawab.
 <@&1500083857591107744>
 
 ━━━━━━━━━━━━━━━━━━
-📋 **TEMPLATE ABSENSI:**
-```text
-Nama: 
-Pangkat: 
-Job: 
-Divisi: 
-Status: Hadir
-Ping: <@&1500812071024197682>
-```
-*(Wajib menyertakan screenshot/foto in-game)*"""
+{TEMPLATE_ABSEN_HINT}"""
 
 # Template Teks Penutupan (22:00 WIB)
 CLOSING_MESSAGE = """# 【 WAKTU ISTIRAHAT TELAH TIBA 】
@@ -155,7 +157,17 @@ async def on_message(message):
         if is_wajib:
             content = message.content
 
-            # Validasi 1: Wajib Melampirkan Foto / Screenshot
+            # Validasi 1: Cek apakah sudah pernah berhasil absen hari ini (Cegah & Hapus Absen Ganda)
+            cursor.execute("SELECT * FROM attendance WHERE user_id = ? AND date = ?", (str(message.author.id), today_str))
+            if cursor.fetchone():
+                await message.delete()
+                await message.channel.send(
+                    f"⚠️ {message.author.mention} Kamu sudah berhasil absen hari ini ({today_str}). Tidak diperbolehkan mengirim absen ganda!",
+                    delete_after=15
+                )
+                return
+
+            # Validasi 2: Wajib Melampirkan Foto / Screenshot
             if not message.attachments:
                 await message.delete()
                 await message.channel.send(
@@ -164,7 +176,7 @@ async def on_message(message):
                 )
                 return
 
-            # Validasi 2: Template Teks Absensi Wajib
+            # Validasi 3: Template Teks Absensi Wajib
             required_fields = ["Nama:", "Pangkat:", "Job:", "Divisi:", "Status: Hadir", "<@&1500812071024197682>"]
             missing_fields = [f for f in required_fields if f not in content]
             if missing_fields:
@@ -186,20 +198,13 @@ async def on_message(message):
                 )
                 return
 
-            # Validasi 3: Cek 1 Absen Sukses per Hari
-            cursor.execute("SELECT * FROM attendance WHERE user_id = ? AND date = ?", (str(message.author.id), today_str))
-            if cursor.fetchone():
-                await message.delete()
-                await message.channel.send(
-                    f"⚠️ {message.author.mention} Kamu sudah berhasil absen hari ini ({today_str}). Tidak diperbolehkan mengirim absen ganda!",
-                    delete_after=15
-                )
-                return
-
             # Absen Diterima & Tercatat
             cursor.execute("INSERT INTO attendance (user_id, date) VALUES (?, ?)", (str(message.author.id), today_str))
             conn.commit()
             await message.add_reaction("✅")
+
+            # Siklus Otomatis: Kirimkan template absen baru ke channel agar selalu muncul di bawah aktivitas
+            await message.channel.send(TEMPLATE_ABSEN_HINT)
 
     await bot.process_commands(message)
 
