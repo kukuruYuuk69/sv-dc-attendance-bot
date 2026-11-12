@@ -554,41 +554,71 @@ async def cmd_rekap(ctx):
 
 # 3. Command Teguran Manual: !tegur @member [pesan]
 @bot.command(name="tegur")
-async def cmd_tegur(ctx, member: discord.Member, *, pesan: str = "Teguran kedisiplinan absensi dinas"):
+async def cmd_tegur(ctx, member: discord.Member = None, *, pesan: str = None):
+    # Validasi Hak Akses (Admin / Moderator)
     if not is_staff(ctx.author):
-        await ctx.send("❌ Kamu tidak memiliki izin untuk memberikan teguran.", delete_after=10)
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        await ctx.send(f"❌ {ctx.author.mention} Anda tidak memiliki izin untuk menggunakan perintah ini.", delete_after=10)
         return
+
+    # Validasi Argumen
+    if member is None or not pesan:
+        await ctx.send(
+            f"⚠️ {ctx.author.mention} Format penggunaan salah!\n"
+            f"Gunakan: `!tegur @member [pesan teguran]`",
+            delete_after=15
+        )
+        return
+
+    # 1. Hapus pesan command asli agar channel tetap bersih
+    try:
+        await ctx.message.delete()
+    except Exception as e:
+        print(f"Gagal menghapus pesan command !tegur: {e}")
 
     cfg = get_config()
     mod_mention_str = " ".join([f"<@&{r}>" for r in cfg["role_moderator_ids"]])
 
-    # Kirim teguran resmi di channel
+    # 2. Kirim pesan teguran resmi dalam format Embed tegas
     embed = discord.Embed(
         title="⚠️ SURAT TEGURAN KEDISIPLINAN RESMI",
         description=(
-            f"**Kepada:** {member.mention} (`{member.name}`)\n"
-            f"**Oleh:** {ctx.author.mention}\n"
-            f"**Catatan Pelanggaran:**\n```{pesan}```\n"
-            f"Harap segera meningkatkan kedisiplinan absensi dinas sesuai PRD dan aturan kesatuan!"
+            f"**Personel Dituju:** {member.mention} (`{member.display_name}`)\n"
+            f"**Pejabat Pengawas/Staf:** {ctx.author.mention}\n\n"
+            f"**Isi Catatan Pelanggaran:**\n```{pesan}```\n"
+            f"⚠️ *Peringatan resmi ini dicatat ke dalam rekam jejak kedisiplinan kesatuan. "
+            f"Harap segera memperbaiki disiplin dinas dan kepatuhan absensi!*"
         ),
         color=discord.Color.gold(),
         timestamp=datetime.now(pytz.UTC)
     )
-    embed.set_footer(text="Komando Disiplin PASPAMPRES")
+    embed.set_footer(text="Komando Disiplin & Pengawasan PASPAMPRES")
     await ctx.send(content=f"{member.mention} {mod_mention_str}", embed=embed)
 
-    # Catat ke audit log
+    # 3. Catat ke audit log
     await send_audit_log(
         ctx.guild,
-        "⚠️ Teguran Kedisiplinan Dikeluarkan",
+        "⚠️ Teguran Kedisiplinan Resmi Dikeluarkan",
         f"{ctx.author.mention} mengeluarkan teguran resmi untuk {member.mention}.",
         color=discord.Color.gold(),
         fields={
             "Personel Ditegur": f"{member.name} ({member.id})",
             "Pemberi Teguran": f"{ctx.author.name} ({ctx.author.id})",
-            "Pesan": pesan
+            "Catatan Pelanggaran": pesan
         }
     )
+
+@cmd_tegur.error
+async def cmd_tegur_error(ctx, error):
+    if isinstance(error, commands.MemberNotFound):
+        await ctx.send(f"❌ {ctx.author.mention} Member tidak ditemukan! Pastikan Anda men-tag member yang valid (contoh: `!tegur @nama [pesan]`).", delete_after=10)
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"⚠️ {ctx.author.mention} Format tidak lengkap! Gunakan: `!tegur @member [pesan]`.", delete_after=10)
+    else:
+        print(f"Error pada command !tegur: {error}")
 
 # 4. Command Override Absen: !override_absen @member tambah/kurang [YYYY-MM-DD]
 @bot.command(name="override_absen")
