@@ -1,84 +1,78 @@
-# IMPLEMENTATION DOCUMENT: GRACEFUL AUTO-EXIT & GITHUB ACTIONS WORKFLOW
+# IMPLEMENTATION DOCUMENT: AUTO-LOCK & UNLOCK SALURAN ABSENSI
 
-Dokumen ini memuat panduan implementasi modul timer *Graceful Auto-Exit* di `bot.py` serta instruksi izin GitHub CLI untuk mempublikasikan file workflow GitHub Actions.
+Dokumen teknis ini memuat langkah implementasi perubahan hak akses saluran absensi (`Channel Permission Overwrite`) pada file `bot.py`.
 
 ---
 
-## 1. Modifikasi Teknis `bot.py` (Timer Internal 295 Menit)
+## 1. Modifikasi Fungsi Operasional Saluran (`bot.py`)
 
-### 1.1 Implementasi Async Task Lifecycle
-Tambahkan coroutine `graceful_shutdown_task` menggunakan `asyncio` yang berjalan di latar belakang sejak bot siap (`on_ready`):
+### 1.1 Fungsi `execute_opening` (Auto-Unlock)
+Perbarui fungsi `execute_opening` agar memulihkan hak kirim pesan bagi `@everyone` sebelum mengirimkan template presensi:
 
 ```python
-import asyncio
-
-# Durasi operasional aman sebelum runner GitHub Actions mencapai batas timeout (4 jam 55 menit)
-RUN_DURATION_MINUTES = 295
-
-async def graceful_shutdown_task():
-    await bot.wait_until_ready()
-    print(f"[LIFECYCLE] Bot siap. Memulai timer operasional aman: {RUN_DURATION_MINUTES} menit.")
-    await asyncio.sleep(RUN_DURATION_MINUTES * 60)
-    
-    print("[LIFECYCLE] Timer 295 menit tercapai. Melakukan penutupan koneksi bersih...")
-
-    # 1. Hentikan task looping
-    if check_dynamic_schedules.is_running():
-        check_dynamic_schedules.stop()
-
-    # 2. Tutup koneksi database SQLite secara aman
+async def execute_opening(channel: discord.TextChannel, cfg: dict):
     try:
-        conn.commit()
-        conn.close()
-        print("[LIFECYCLE] Transaksi SQLite berhasil disimpan dan koneksi ditutup.")
-    except Exception as e:
-        print(f"[LIFECYCLE] Peringatan saat menutup database: {e}")
+        # Buka izin kirim pesan untuk role @everyone
+        try:
+            await channel.set_permissions(
+                channel.guild.default_role,
+                send_messages=True,
+                reason="Sesi absensi dibuka otomatis oleh bot"
+            )
+        except Exception as e_perm:
+            print(f"[PERMISSION] Gagal membuka kunci saluran {channel.name}: {e_perm}")
 
-    # 3. Putuskan koneksi Discord Gateway
-    try:
-        await bot.close()
-        print("[LIFECYCLE] Koneksi Discord Gateway ditutup dengan sukses (Exit 0).")
+        open_text = get_rendered_template_text(cfg, "opening", DEFAULT_TEMPLATES["opening"])
+        absen_template = render_attendance_template(cfg)
+        full_message = f"{open_text}\n\n━━━━━━━━━━━━━━━━━━\n{absen_template}"
+
+        await channel.send(full_message)
+        return True
     except Exception as e:
-        print(f"[LIFECYCLE] Peringatan saat menutup sesi bot: {e}")
+        print(f"Error opening announcement: {e}")
+        return False
 ```
 
-### 1.2 Registrasi Task pada Event `on_ready`
-Pada event `on_ready()`, daftarkan task agar otomatis berjalan saat bot berhasil login:
+### 1.2 Fungsi `execute_closing` (Auto-Lock)
+Perbarui fungsi `execute_closing` agar mencabut hak kirim pesan bagi `@everyone` sebelum/setelah mengirimkan pengumuman penutupan:
+
 ```python
-@bot.event
-async def on_ready():
-    # ... sinkronisasi slash commands ...
-    bot.loop.create_task(graceful_shutdown_task())
+async def execute_closing(channel: discord.TextChannel, cfg: dict):
+    try:
+        close_text = get_rendered_template_text(cfg, "closing", DEFAULT_TEMPLATES["closing"])
+        await channel.send(close_text)
+
+        # Kunci izin kirim pesan untuk role @everyone
+        try:
+            await channel.set_permissions(
+                channel.guild.default_role,
+                send_messages=False,
+                reason="Sesi absensi ditutup otomatis oleh bot"
+            )
+        except Exception as e_perm:
+            print(f"[PERMISSION] Gagal mengunci saluran {channel.name}: {e_perm}")
+
+        return True
+    except Exception as e:
+        print(f"Error closing announcement: {e}")
+        return False
 ```
 
 ---
 
-## 2. Otorisasi GitHub CLI & Push Workflow
-
-GitHub secara ketat membatasi modifikasi direktori `.github/workflows/` melalui koneksi OAuth jika token belum memiliki cakupan hak akses (*scope*) `workflow`.
-
-### 2.1 Prosedur Pembaharuan Scope Izin
-Jalankan perintah berikut pada terminal PowerShell:
-
-```powershell
-# 1. Perbarui scope autentikasi GitHub CLI agar mencakup hak izin workflow
-gh auth refresh -s workflow
-
-# 2. Setelah proses otorisasi web selesai, tambahkan file workflow ke staging Git
-git add .github/workflows/bot_runner.yml
-
-# 3. Lakukan commit perubahan
-git commit -m "ci: add workflow"
-
-# 4. Push workflow ke repositori remote
-git push origin master
-```
+## 2. Dampak pada Slash Commands & Background Scheduler
+- Slash commands `/buka_absen` dan `/tutup_absen` secara otomatis mewarisi perilaku baru ini karena keduanya memanggil `execute_opening` dan `execute_closing`.
+- Background task `check_dynamic_schedules` juga langsung mengunci atau membuka saluran secara otomatis saat waktu `open_time` dan `close_time` tercapai tanpa memerlukan perubahan kode loop tambahan.
 
 ---
 
-## 3. Checklist Verifikasi
-- [ ] Task `graceful_shutdown_task` terdaftar di event loop tanpa blocking.
-- [ ] `python -m py_compile bot.py` lolos tanpa syntax error.
-- [ ] Scope `gh auth status` menampilkan izin `'workflow'`.
-- [ ] File `.github/workflows/bot_runner.yml` berhasil terdorong ke remote repository GitHub `master`.
-- [ ] Tab Actions di GitHub menampilkan workflow `Discord Attendance Bot Runner` yang aktif.
+## 3. Daftar Pengujian & Verifikasi (Testing Checklist)
+
+| No | Skenario Uji | Tindakan / Prosedur | Hasil yang Diharapkan |
+| :--- | :--- | :--- | :--- |
+| 1 | **Tutup Manual (`/tutup_absen`)** | Staf mengeksekusi `/tutup_absen` | Saluran terkunci, `@everyone` tidak dapat mengetik pesan, pengumuman penutupan terkirim. |
+| 2 | **Buka Manual (`/buka_absen`)** | Staf mengeksekusi `/buka_absen` | Saluran terbuka kembali, `@everyone` dapat mengetik pesan, template form terkirim di posisi bawah. |
+| 3 | **Jadwal Otomatis Jam Tutup** | Jam WIB mencapai `close_time` | Saluran otomatis terkunci tanpa intervensi manusia. |
+| 4 | **Jadwal Otomatis Jam Buka** | Jam WIB mencapai `open_time` | Saluran otomatis terbuka kembali tanpa intervensi manusia. |
+| 5 | **Hak Akses Bot & Staf** | Saluran dalam status terkunci | Bot dan Administrator tetap dapat mengirim pesan / embed di saluran. |
+| 6 | **Penanganan Izin Hilang** | Izin `Manage Channel` bot dicabut | Bot tetap mengirim teks pengumuman dan mencatat peringatan di log konsol tanpa *crash*. |
