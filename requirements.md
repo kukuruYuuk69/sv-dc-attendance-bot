@@ -1,34 +1,43 @@
-# REQUIREMENTS DOCUMENT: GRACEFUL AUTO-EXIT & GITHUB ACTIONS WORKFLOW
+# REQUIREMENTS DOCUMENT: AUTO-LOCK & UNLOCK SALURAN ABSENSI
 
 ## 1. Pendahuluan
-Dokumen ini menetapkan spesifikasi fungsional untuk pengoperasian bot absensi Discord (`sv-dc-attendance-bot`) di lingkungan GitHub Actions Runner. Pendekatan ini mengutamakan stabilitas sistem, integritas data transaksi absensi, serta pemanfaatan infrastruktur komputasi *Open Source* 100% gratis tanpa perlu registrasi kartu kredit (*No CC*).
+Saluran absensi (`absen_channel_id`) merupakan kanal resmi presensi kedisiplinan anggota. Saat ini, ketika sesi absensi ditutup melalui jadwal otomatis (`close_time`) atau slash command `/tutup_absen`, bot hanya mengirimkan pesan pengumuman penutupan tanpa mengubah izin kirim pesan. Hal ini membuka celah bagi anggota untuk tetap mengirim pesan, presensi terlambat, atau spam di luar jam operasional dinas.
+
+Dokumen ini menetapkan kebutuhan sistem untuk menerapkan mekanisme **Auto-Lock & Unlock Saluran Absensi** berbasis modifikasi hak akses saluran Discord (*Channel Permission Overwrite*).
 
 ---
 
 ## 2. Analisis & Kebutuhan Inti
 
-### 2.1 Fitur Pengaman Graceful Auto-Exit (Timer 295 Menit)
-- **Konteks & Batasan GitHub Actions:**
-  - Runner GitHub Actions memiliki batas durasi per job hingga 360 menit (6 jam). File workflow diatur dengan `timeout-minutes: 350` untuk mencegah runner menggantung tanpa batas.
-  - Jika proses dihentikan paksa oleh sistem (*SIGKILL* / timeout), penulisan data pada SQLite dapat tertahan dalam mode *write-ahead log* (WAL) atau *uncommitted transaction*, yang berisiko menyebabkan berkas `attendance.db` korup ketika dicadangkan.
-- **Kebutuhan Sistem:**
-  - Bot wajib memiliki *lifecycle check* berbasis timer internal (295 menit / 4 jam 55 menit).
-  - Saat durasi 295 menit tercapai, bot harus secara proaktif melakukan penghentian anggun (*graceful shutdown*):
-    1. Menghentikan loop penjadwalan dinamis (`tasks.loop`).
-    2. Menyimpan seluruh transaksi yang tertunda dan menutup koneksi database SQLite (`conn.commit()`, `conn.close()`).
-    3. Menutup koneksi Discord Gateway secara formal (`await bot.close()`).
-    4. Mengakhiri proses dengan kode keluar sukses (`exit code 0`).
-  - Hal ini menjamin bahwa langkah `actions/cache` atau backup data berikutnya di runner GitHub Actions menyimpan file `attendance.db` dalam kondisi bersih (*clean state*).
+### 2.1 Penguncian Otomatis Saluran Absensi (Auto-Lock)
+- **Kondisi Pemicu:**
+  1. Trigger jadwal otomatis penutupan dinas (`close_time` pada loop per menit).
+  2. Eksekusi manual slash command `/tutup_absen` oleh staf pengawas atau administrator.
+- **Tindakan Sistem:**
+  - Mengubah izin saluran absensi untuk role default server (`@everyone` / `guild.default_role`):
+    - `send_messages = False`
+  - Memastikan bot dan staf pengawas tetap mempertahankan izin akses dan kelola saluran (`send_messages = True`).
+  - Mengirimkan pengumuman penutupan absensi yang memberi tahu seluruh anggota bahwa sesi telah berakhir dan saluran telah dikunci.
 
-### 2.2 Pendekatan Open Source 100% Tanpa Kartu Kredit (No CC)
-- Seluruh kebutuhan komputasi dan *state retention* bot dipenuhi secara eksklusif menggunakan:
-  - **Runner GitHub Actions Publik**: Kuota gratis yang disediakan oleh GitHub untuk repositori tanpa syarat input kartu kredit atau tagihan tersembunyi.
-  - **Cron Schedule Estafet**: Jadwal periodik `cron: '0 */5 * * *'` yang menyambung eksekusi runner berikutnya secara otomatis setelah runner sebelumnya berhenti anggun.
-  - **GitHub Native Cache / Branch Storage**: Penyimpanan persisten file `attendance.db` tanpa memerlukan server database cloud berbayar.
+### 2.2 Pembukaan Otomatis Saluran Absensi (Auto-Unlock)
+- **Kondisi Pemicu:**
+  1. Trigger jadwal otomatis pembukaan dinas (`open_time` pada loop per menit).
+  2. Eksekusi manual slash command `/buka_absen` oleh staf pengawas atau administrator.
+- **Tindakan Sistem:**
+  - Mengembalikan izin kirim pesan saluran absensi untuk role `@everyone`:
+    - `send_messages = True` (atau `None` jika mengikuti warisan kategori, direkomendasikan eksplisit `True` untuk menjamin anggota dapat absen).
+  - Mengirimkan pengumuman pembukaan dinas beserta template formulir absensi baru di posisi bawah.
+
+### 2.3 Pencegahan Pesan di Luar Jam Operasional
+- Dengan terkuncinya saluran secara hak akses Discord:
+  - Input teks pengguna di Discord client langsung dinonaktifkan (kotak pesan bertuliskan *"You do not have permission to send messages in this channel"*).
+  - Mengurangi beban komputasi bot dan log audit karena tidak perlu menghapus pesan ilegal yang masuk saat sesi tutup.
+  - Menghilangkan friksi perdebatan waktu presensi karena sistem saluran terkunci secara objektif dan tersinkronisasi dengan waktu WIB.
 
 ---
 
 ## 3. Matriks Kriteria Penerimaan (Acceptance Criteria)
-1. **Pencegahan Data Corruption**: SQLite ditutup dengan `conn.close()` sebelum step pasca-eksekusi runner menyimpan file database.
-2. **Estafet Berkesinambungan**: Bot mati secara teratur sebelum batas 350 menit, memungkinkan job workflow sukses (`success`) dan siap disambung oleh jadwal cron berikutnya.
-3. **Bebas Biaya**: Tidak melibatkan registrasi platform berbayar pihak ketiga.
+1. **Eksekusi Penutupan:** Saat `/tutup_absen` atau `close_time` tercapai, role `@everyone` tidak lagi dapat mengirim pesan ke saluran absensi.
+2. **Eksekusi Pembukaan:** Saat `/buka_absen` atau `open_time` tercapai, role `@everyone` kembali dapat mengirim pesan ke saluran absensi.
+3. **Ketahanan Izin Staf & Bot:** Bot dan role staf tidak kehilangan akses mengelola pesan di saluran absensi meskipun saluran sedang terkunci.
+4. **Penanganan Error Izin:** Jika bot tidak memiliki izin `Manage Channels` (`manage_permissions`), sistem menangani error secara aman melalui log audit tanpa memicu *bot crash*.
