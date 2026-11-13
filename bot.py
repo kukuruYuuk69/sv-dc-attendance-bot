@@ -7,6 +7,7 @@ import pytz
 import os
 import json
 import re
+import asyncio
 from typing import Literal
 
 # Auto-load .env jika file ada
@@ -1224,6 +1225,37 @@ async def check_dynamic_schedules():
             print(f"Error pada loop jadwal guild {guild.id}: {e}")
 
 # ==========================================
+# GRACEFUL AUTO-EXIT (RUNNER LIFECYCLE TIMER)
+# ==========================================
+RUN_DURATION_MINUTES = 295  # 4 Jam 55 Menit (aman sebelum batas timeout 350 menit GitHub Actions)
+
+async def graceful_shutdown_task():
+    await bot.wait_until_ready()
+    print(f"[LIFECYCLE] Bot aktif. Memulai timer operasional aman: {RUN_DURATION_MINUTES} menit.")
+    await asyncio.sleep(RUN_DURATION_MINUTES * 60)
+
+    print("[LIFECYCLE] Timer 295 menit tercapai. Memulai graceful shutdown...")
+
+    # 1. Hentikan task background loop
+    if check_dynamic_schedules.is_running():
+        check_dynamic_schedules.stop()
+
+    # 2. Tutup koneksi database SQLite secara aman
+    try:
+        conn.commit()
+        conn.close()
+        print("[LIFECYCLE] Transaksi SQLite berhasil disimpan dan koneksi ditutup.")
+    except Exception as e:
+        print(f"[LIFECYCLE] Peringatan saat menutup database: {e}")
+
+    # 3. Putuskan koneksi Discord Gateway
+    try:
+        await bot.close()
+        print("[LIFECYCLE] Koneksi Discord Gateway ditutup dengan sukses (Exit 0).")
+    except Exception as e:
+        print(f"[LIFECYCLE] Peringatan saat menutup sesi bot: {e}")
+
+# ==========================================
 # EVENTS (on_ready, on_guild_join, on_message, on_raw_reaction_add)
 # ==========================================
 @bot.event
@@ -1240,6 +1272,9 @@ async def on_ready():
 
     if not check_dynamic_schedules.is_running():
         check_dynamic_schedules.start()
+
+    # Daftarkan Graceful Auto-Exit Task di Event Loop
+    bot.loop.create_task(graceful_shutdown_task())
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
