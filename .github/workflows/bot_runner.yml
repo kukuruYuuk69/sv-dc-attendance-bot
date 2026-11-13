@@ -1,0 +1,55 @@
+name: Discord Attendance Bot Runner
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+  schedule:
+    # Trigger periodik setiap 5 jam untuk me-refresh runner sebelum timeout 6 jam VM GitHub
+    - cron: '0 */5 * * *'
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python Runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Code Syntax & Integrity Check
+        run: |
+          python -m py_compile bot.py
+
+      - name: Restore SQLite Database State (If Cached)
+        uses: actions/cache/restore@v4
+        with:
+          path: attendance.db
+          key: attendance-db-${{ github.run_id }}
+          restore-keys: |
+            attendance-db-
+
+      - name: Execute Discord Bot
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          LOG_CHANNEL_ID: ${{ secrets.LOG_CHANNEL_ID }}
+        run: |
+          python bot.py
+
+      - name: Save SQLite Database State
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: attendance.db
+          key: attendance-db-${{ github.run_id }}
