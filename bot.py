@@ -389,108 +389,172 @@ async def send_audit_log(guild: discord.Guild, title: str, description: str, col
     except Exception:
         pass
 
+# Helper: Cek apakah sesi absensi saat ini sedang buka berdasarkan open_time dan close_time
+def is_attendance_currently_open(cfg: dict) -> bool:
+    try:
+        now_wib = datetime.now(WIB).time()
+        open_h, open_m = map(int, cfg.get("open_time", "07:00").split(":"))
+        close_h, close_m = map(int, cfg.get("close_time", "22:00").split(":"))
+        t_open = time(open_h, open_m)
+        t_close = time(close_h, close_m)
+
+        if t_open <= t_close:
+            return t_open <= now_wib < t_close
+        else:
+            # Lintas tengah malam
+            return now_wib >= t_open or now_wib < t_close
+    except Exception:
+        return False
+
 # Helper: Update Hak Akses Channel Absensi (Lock/Unlock & Role Visibility)
 async def update_attendance_channel_permissions(channel: discord.TextChannel, cfg: dict, is_open: bool):
     guild = channel.guild
     try:
-        # 1. Kunci @everyone: Tidak bisa melihat channel dan tidak bisa kirim pesan
-        await channel.set_permissions(
-            guild.default_role,
+        # 1. Kunci @everyone: Tidak bisa melihat channel, tidak bisa kirim pesan, tidak bisa thread/reaksi
+        everyone_overwrite = discord.PermissionOverwrite(
             view_channel=False,
             send_messages=False,
-            reason="Konfigurasi privasi default saluran absensi"
+            send_messages_in_threads=False,
+            create_public_threads=False,
+            create_private_threads=False,
+            add_reactions=False
         )
+        await channel.set_permissions(guild.default_role, overwrite=everyone_overwrite, reason="Privasi dan kunci saluran absensi")
 
-        # 2. Berikan akses View dan Manage untuk Bot
-        await channel.set_permissions(
-            guild.me,
+        # 2. Berikan akses View dan Manage penuh untuk Bot
+        bot_overwrite = discord.PermissionOverwrite(
             view_channel=True,
             send_messages=True,
+            send_messages_in_threads=True,
             embed_links=True,
             attach_files=True,
             read_message_history=True,
             manage_messages=True,
-            manage_permissions=True,
-            reason="Izin operasional bot absensi"
+            manage_permissions=True
         )
+        await channel.set_permissions(guild.me, overwrite=bot_overwrite, reason="Izin penuh operasional bot absensi")
 
-        # 3. Role Wajib Absen: View = True, Send = is_open
-        for r_id in cfg.get("wajib_absen_roles", []):
-            role = guild.get_role(r_id)
-            if role:
-                await channel.set_permissions(
-                    role,
-                    view_channel=True,
-                    send_messages=is_open,
-                    attach_files=is_open,
-                    read_message_history=True,
-                    reason=f"Status absensi: {'BUKA' if is_open else 'TUTUP'}"
-                )
+        # 3. Role Wajib Absen: View = True, Send/Thread = is_open (Eksplisit Cast ke Integer)
+        for r_item in cfg.get("wajib_absen_roles", []):
+            try:
+                r_id = int(r_item)
+            except (ValueError, TypeError):
+                continue
 
-        # 4. Role Staf: Selalu bisa View dan Send messages (untuk pengawasan & pengumuman)
-        for r_id in cfg.get("staff_roles", []):
             role = guild.get_role(r_id)
-            if role:
-                await channel.set_permissions(
-                    role,
+            if not role:
+                print(f"[PERMISSION] Role wajib absen ID {r_id} tidak ditemukan di server {guild.name}.")
+                continue
+
+            if is_open:
+                absen_overwrite = discord.PermissionOverwrite(
                     view_channel=True,
                     send_messages=True,
-                    manage_messages=True,
-                    read_message_history=True,
-                    reason="Akses staf pengawas absensi"
+                    send_messages_in_threads=True,
+                    attach_files=True,
+                    embed_links=True,
+                    read_message_history=True
                 )
+            else:
+                absen_overwrite = discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=False,
+                    send_messages_in_threads=False,
+                    create_public_threads=False,
+                    create_private_threads=False,
+                    add_reactions=False,
+                    read_message_history=True
+                )
+
+            await channel.set_permissions(role, overwrite=absen_overwrite, reason=f"Sesi absensi: {'BUKA' if is_open else 'TUTUP'}")
+
+        # 4. Role Staf: Selalu bisa View dan Send messages (untuk pengawasan & pengumuman)
+        for s_item in cfg.get("staff_roles", []):
+            try:
+                s_id = int(s_item)
+            except (ValueError, TypeError):
+                continue
+
+            role = guild.get_role(s_id)
+            if role:
+                staff_overwrite = discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    send_messages_in_threads=True,
+                    manage_messages=True,
+                    read_message_history=True
+                )
+                await channel.set_permissions(role, overwrite=staff_overwrite, reason="Izin staf pengawas absensi")
+
+    except discord.Forbidden as e_forbid:
+        print(f"[PERMISSION ERROR] Akses ditolak saat mengubah permission di {channel.name}. Pastikan role bot berada di posisi atas dan memiliki izin Manage Roles/Permissions: {e_forbid}")
     except Exception as e:
-        print(f"[PERMISSION] Gagal memperbarui izin pada {channel.name}: {e}")
+        print(f"[PERMISSION ERROR] Gagal memperbarui izin pada {channel.name}: {e}")
 
 # Helper: Update Hak Akses Channel Rekap (Read-Only untuk Anggota & Staf)
 async def update_rekap_channel_permissions(channel: discord.TextChannel, cfg: dict):
     guild = channel.guild
     try:
         # @everyone: Tidak bisa melihat
-        await channel.set_permissions(
-            guild.default_role,
+        everyone_overwrite = discord.PermissionOverwrite(
             view_channel=False,
             send_messages=False,
-            reason="Saluran rekap privat"
+            send_messages_in_threads=False,
+            create_public_threads=False,
+            create_private_threads=False,
+            add_reactions=False
         )
+        await channel.set_permissions(guild.default_role, overwrite=everyone_overwrite, reason="Saluran rekap privat")
 
         # Bot: Penuh
-        await channel.set_permissions(
-            guild.me,
+        bot_overwrite = discord.PermissionOverwrite(
             view_channel=True,
             send_messages=True,
             embed_links=True,
             read_message_history=True,
             manage_messages=True,
-            reason="Bot pengirim laporan rekap"
+            manage_permissions=True
         )
+        await channel.set_permissions(guild.me, overwrite=bot_overwrite, reason="Bot pengirim laporan rekap")
 
         # Wajib Absen: View = True, Send = False (Read-Only)
-        for r_id in cfg.get("wajib_absen_roles", []):
+        for r_item in cfg.get("wajib_absen_roles", []):
+            try:
+                r_id = int(r_item)
+            except (ValueError, TypeError):
+                continue
+
             role = guild.get_role(r_id)
             if role:
-                await channel.set_permissions(
-                    role,
+                rekap_member_overwrite = discord.PermissionOverwrite(
                     view_channel=True,
                     send_messages=False,
+                    send_messages_in_threads=False,
                     read_message_history=True,
-                    add_reactions=True,
-                    reason="Akses baca laporan rekap bagi anggota"
+                    add_reactions=True
                 )
+                await channel.set_permissions(role, overwrite=rekap_member_overwrite, reason="Akses baca laporan rekap bagi anggota")
 
         # Staf: View = True, Send = True
-        for r_id in cfg.get("staff_roles", []):
-            role = guild.get_role(r_id)
+        for s_item in cfg.get("staff_roles", []):
+            try:
+                s_id = int(s_item)
+            except (ValueError, TypeError):
+                continue
+
+            role = guild.get_role(s_id)
             if role:
-                await channel.set_permissions(
-                    role,
+                staff_rekap_overwrite = discord.PermissionOverwrite(
                     view_channel=True,
                     send_messages=True,
-                    read_message_history=True,
-                    reason="Akses staf di saluran rekap"
+                    send_messages_in_threads=True,
+                    read_message_history=True
                 )
+                await channel.set_permissions(role, overwrite=staff_rekap_overwrite, reason="Akses staf di saluran rekap")
+    except discord.Forbidden as e_forbid:
+        print(f"[PERMISSION ERROR] Akses ditolak saat mengubah permission rekap: {e_forbid}")
     except Exception as e:
-        print(f"[PERMISSION] Gagal memperbarui izin channel rekap: {e}")
+        print(f"[PERMISSION ERROR] Gagal memperbarui izin channel rekap: {e}")
 
 async def execute_opening(channel: discord.TextChannel, cfg: dict):
     try:
@@ -946,10 +1010,21 @@ class StaffRoleSelectView(discord.ui.View):
 
         update_guild_config(interaction.guild.id, "staff_roles", selected_ids)
 
+        # Sinkronisasi langsung izin saluran absensi & rekap
+        cfg = get_guild_config(interaction.guild.id)
+        absen_ch = interaction.guild.get_channel(cfg["absen_channel_id"])
+        if absen_ch:
+            is_open = is_attendance_currently_open(cfg)
+            await update_attendance_channel_permissions(absen_ch, cfg, is_open)
+
+        rekap_ch = interaction.guild.get_channel(cfg["rekap_channel_id"])
+        if rekap_ch:
+            await update_rekap_channel_permissions(rekap_ch, cfg)
+
         roles_mentions = ", ".join([r.mention for r in selected_roles])
         embed = discord.Embed(
             title="✅ Role Staf Pengawas Berhasil Diperbarui",
-            description=f"Daftar role staf pengawas aktif:\n{roles_mentions}",
+            description=f"Daftar role staf pengawas aktif:\n{roles_mentions}\n\n*Izin saluran absensi & rekap telah disinkronkan secara langsung.*",
             color=discord.Color.green()
         )
         await interaction.response.edit_message(embed=embed, view=None)
@@ -975,10 +1050,21 @@ class AbsenRoleSelectView(discord.ui.View):
 
         update_guild_config(interaction.guild.id, "wajib_absen_roles", selected_ids)
 
+        # Sinkronisasi langsung izin saluran absensi & rekap
+        cfg = get_guild_config(interaction.guild.id)
+        absen_ch = interaction.guild.get_channel(cfg["absen_channel_id"])
+        if absen_ch:
+            is_open = is_attendance_currently_open(cfg)
+            await update_attendance_channel_permissions(absen_ch, cfg, is_open)
+
+        rekap_ch = interaction.guild.get_channel(cfg["rekap_channel_id"])
+        if rekap_ch:
+            await update_rekap_channel_permissions(rekap_ch, cfg)
+
         roles_mentions = ", ".join([r.mention for r in selected_roles])
         embed = discord.Embed(
             title="✅ Role Wajib Absen Berhasil Diperbarui",
-            description=f"Daftar role wajib absen aktif:\n{roles_mentions}",
+            description=f"Daftar role wajib absen aktif:\n{roles_mentions}\n\n*Izin saluran absensi & rekap telah disinkronkan secara langsung.*",
             color=discord.Color.green()
         )
         await interaction.response.edit_message(embed=embed, view=None)
