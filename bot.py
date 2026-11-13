@@ -389,13 +389,119 @@ async def send_audit_log(guild: discord.Guild, title: str, description: str, col
     except Exception:
         pass
 
+# Helper: Update Hak Akses Channel Absensi (Lock/Unlock & Role Visibility)
+async def update_attendance_channel_permissions(channel: discord.TextChannel, cfg: dict, is_open: bool):
+    guild = channel.guild
+    try:
+        # 1. Kunci @everyone: Tidak bisa melihat channel dan tidak bisa kirim pesan
+        await channel.set_permissions(
+            guild.default_role,
+            view_channel=False,
+            send_messages=False,
+            reason="Konfigurasi privasi default saluran absensi"
+        )
+
+        # 2. Berikan akses View dan Manage untuk Bot
+        await channel.set_permissions(
+            guild.me,
+            view_channel=True,
+            send_messages=True,
+            embed_links=True,
+            attach_files=True,
+            read_message_history=True,
+            manage_messages=True,
+            manage_permissions=True,
+            reason="Izin operasional bot absensi"
+        )
+
+        # 3. Role Wajib Absen: View = True, Send = is_open
+        for r_id in cfg.get("wajib_absen_roles", []):
+            role = guild.get_role(r_id)
+            if role:
+                await channel.set_permissions(
+                    role,
+                    view_channel=True,
+                    send_messages=is_open,
+                    attach_files=is_open,
+                    read_message_history=True,
+                    reason=f"Status absensi: {'BUKA' if is_open else 'TUTUP'}"
+                )
+
+        # 4. Role Staf: Selalu bisa View dan Send messages (untuk pengawasan & pengumuman)
+        for r_id in cfg.get("staff_roles", []):
+            role = guild.get_role(r_id)
+            if role:
+                await channel.set_permissions(
+                    role,
+                    view_channel=True,
+                    send_messages=True,
+                    manage_messages=True,
+                    read_message_history=True,
+                    reason="Akses staf pengawas absensi"
+                )
+    except Exception as e:
+        print(f"[PERMISSION] Gagal memperbarui izin pada {channel.name}: {e}")
+
+# Helper: Update Hak Akses Channel Rekap (Read-Only untuk Anggota & Staf)
+async def update_rekap_channel_permissions(channel: discord.TextChannel, cfg: dict):
+    guild = channel.guild
+    try:
+        # @everyone: Tidak bisa melihat
+        await channel.set_permissions(
+            guild.default_role,
+            view_channel=False,
+            send_messages=False,
+            reason="Saluran rekap privat"
+        )
+
+        # Bot: Penuh
+        await channel.set_permissions(
+            guild.me,
+            view_channel=True,
+            send_messages=True,
+            embed_links=True,
+            read_message_history=True,
+            manage_messages=True,
+            reason="Bot pengirim laporan rekap"
+        )
+
+        # Wajib Absen: View = True, Send = False (Read-Only)
+        for r_id in cfg.get("wajib_absen_roles", []):
+            role = guild.get_role(r_id)
+            if role:
+                await channel.set_permissions(
+                    role,
+                    view_channel=True,
+                    send_messages=False,
+                    read_message_history=True,
+                    add_reactions=True,
+                    reason="Akses baca laporan rekap bagi anggota"
+                )
+
+        # Staf: View = True, Send = True
+        for r_id in cfg.get("staff_roles", []):
+            role = guild.get_role(r_id)
+            if role:
+                await channel.set_permissions(
+                    role,
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    reason="Akses staf di saluran rekap"
+                )
+    except Exception as e:
+        print(f"[PERMISSION] Gagal memperbarui izin channel rekap: {e}")
+
 async def execute_opening(channel: discord.TextChannel, cfg: dict):
     try:
+        # Buka kunci saluran dan atur permission role
+        await update_attendance_channel_permissions(channel, cfg, is_open=True)
+
         open_text = get_rendered_template_text(cfg, "opening", DEFAULT_TEMPLATES["opening"])
         absen_template = render_attendance_template(cfg)
         full_message = f"{open_text}\n\n━━━━━━━━━━━━━━━━━━\n{absen_template}"
 
-        # Kirim pengumuman pembukaan dan template bersih tanpa auto-pin
+        # Kirim pengumuman pembukaan dan template bersih
         await channel.send(full_message)
         return True
     except Exception as e:
@@ -404,8 +510,12 @@ async def execute_opening(channel: discord.TextChannel, cfg: dict):
 
 async def execute_closing(channel: discord.TextChannel, cfg: dict):
     try:
+        # Kirim embed/pengumuman penutupan
         close_text = get_rendered_template_text(cfg, "closing", DEFAULT_TEMPLATES["closing"])
         await channel.send(close_text)
+
+        # Kunci saluran (send_messages = False untuk wajib_absen & everyone)
+        await update_attendance_channel_permissions(channel, cfg, is_open=False)
         return True
     except Exception as e:
         print(f"Error closing announcement: {e}")
@@ -465,9 +575,14 @@ async def provision_channels_for_guild(guild: discord.Guild):
     # 1. Buat channel absensi jika belum ada
     if not found_absen:
         try:
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False, send_messages=False),
+                guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, embed_links=True, manage_messages=True, manage_permissions=True)
+            }
             found_absen = await guild.create_text_channel(
                 name="attendance",
-                topic="Saluran presensi kehadiran resmi anggota"
+                topic="Saluran presensi kehadiran resmi anggota",
+                overwrites=overwrites
             )
         except Exception as e:
             print(f"Gagal membuat channel attendance di {guild.name}: {e}")
@@ -476,8 +591,8 @@ async def provision_channels_for_guild(guild: discord.Guild):
     if not found_rekap:
         try:
             overwrites = {
-                guild.default_role: discord.PermissionOverwrite(send_messages=False, add_reactions=True, read_messages=True),
-                guild.me: discord.PermissionOverwrite(send_messages=True, embed_links=True, manage_messages=True)
+                guild.default_role: discord.PermissionOverwrite(view_channel=False, send_messages=False),
+                guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, embed_links=True, manage_messages=True, manage_permissions=True)
             }
             found_rekap = await guild.create_text_channel(
                 name="attendance-report",
@@ -491,8 +606,10 @@ async def provision_channels_for_guild(guild: discord.Guild):
     cfg = get_guild_config(guild.id)
     if found_absen:
         update_guild_config(guild.id, "absen_channel_id", found_absen.id)
+        await update_attendance_channel_permissions(found_absen, cfg, is_open=False)
     if found_rekap:
         update_guild_config(guild.id, "rekap_channel_id", found_rekap.id)
+        await update_rekap_channel_permissions(found_rekap, cfg)
 
     # Kirim Onboarding Wizard ke channel absensi
     if found_absen:
@@ -519,7 +636,7 @@ async def provision_channels_for_guild(guild: discord.Guild):
 # ==========================================
 
 # 1. /buka_absen
-@bot.tree.command(name="buka_absen", description="Buka sesi absensi manual, auto-pin, dan kirim template.")
+@bot.tree.command(name="buka_absen", description="Buka sesi absensi manual, buka izin kirim role absen, dan kirim template.")
 async def slash_buka_absen(interaction: discord.Interaction):
     if not check_is_staff(interaction):
         await interaction.response.send_message("❌ Anda tidak memiliki izin untuk menggunakan perintah ini.", ephemeral=True)
@@ -527,15 +644,15 @@ async def slash_buka_absen(interaction: discord.Interaction):
 
     cfg = get_guild_config(interaction.guild.id)
     channel = interaction.guild.get_channel(cfg["absen_channel_id"]) or interaction.channel
-    await interaction.response.send_message("⏳ Membuka sesi absensi dan me-pin pengumuman...", ephemeral=True)
+    await interaction.response.send_message("⏳ Membuka saluran absensi dan mengirim pengumuman...", ephemeral=True)
     success = await execute_opening(channel, cfg)
     if success:
-        await interaction.followup.send("✅ Sesi absensi berhasil dibuka dan di-pin!", ephemeral=True)
+        await interaction.followup.send("✅ Sesi absensi berhasil dibuka dan izin kirim pesan aktif!", ephemeral=True)
     else:
         await interaction.followup.send("❌ Terjadi kendala saat membuka sesi absensi.", ephemeral=True)
 
 # 2. /tutup_absen
-@bot.tree.command(name="tutup_absen", description="Tutup sesi absensi manual dan kirim pengumuman penutupan.")
+@bot.tree.command(name="tutup_absen", description="Tutup sesi absensi manual, kunci izin kirim pesan, dan kirim pengumuman penutupan.")
 async def slash_tutup_absen(interaction: discord.Interaction):
     if not check_is_staff(interaction):
         await interaction.response.send_message("❌ Anda tidak memiliki izin untuk menggunakan perintah ini.", ephemeral=True)
@@ -543,10 +660,10 @@ async def slash_tutup_absen(interaction: discord.Interaction):
 
     cfg = get_guild_config(interaction.guild.id)
     channel = interaction.guild.get_channel(cfg["absen_channel_id"]) or interaction.channel
-    await interaction.response.send_message("⏳ Mengirim pengumuman penutupan absensi...", ephemeral=True)
+    await interaction.response.send_message("⏳ Mengunci saluran dan mengirim pengumuman penutupan...", ephemeral=True)
     success = await execute_closing(channel, cfg)
     if success:
-        await interaction.followup.send("✅ Sesi absensi telah ditutup.", ephemeral=True)
+        await interaction.followup.send("✅ Sesi absensi telah ditutup dan saluran berhasil dikunci.", ephemeral=True)
     else:
         await interaction.followup.send("❌ Terjadi kendala saat menutup sesi absensi.", ephemeral=True)
 
